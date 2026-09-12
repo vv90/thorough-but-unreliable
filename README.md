@@ -6,7 +6,9 @@
 `nixosConfigurations.harness` and `packages.x86_64-linux.harness-image`.
 It produces `harness.qcow2`, with its runtime Nix store inside the disk,
 legacy BIOS/GRUB boot, an 8 GiB virtual disk, and diagnostics on serial port 0
-at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled.
+at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled. A
+noninteractive `harness` service account owns `/var/lib/harness`; a boot-time
+readiness unit verifies its fixed UID/GID and state-directory access.
 The application and the two network interfaces are not configured yet.
 
 On the external Linux builder with KVM available:
@@ -17,11 +19,48 @@ nix build .#harness-image --out-link result-harness
 
 The image builder itself requires KVM. This unprivileged devcontainer can
 evaluate the derivation but cannot assemble or boot it locally.
-The output disk is `result-harness/harness.qcow2`. Boot validation must use a
-disposable overlay, a virtio disk, legacy BIOS, a serial console, and no NICs
-or shared host directories. Successful boot means reaching the systemd
-multi-user target without failed units. The image derivation evaluates against
-the pinned Nixpkgs revision; build and boot validation are pending.
+The output disk is `result-harness/harness.qcow2`.
+
+### Run a boot smoke test with KVM
+
+Run the following commands from the repository root on the KVM host. Create a
+disposable writable overlay so the built base image remains unchanged:
+
+```sh
+mkdir -p .artifacts
+qemu-img create \
+  -f qcow2 \
+  -F qcow2 \
+  -b "$(readlink -f result-harness/harness.qcow2)" \
+  .artifacts/harness-smoke.qcow2
+```
+
+Use a fresh overlay filename for each test. Start the guest with a virtio disk,
+legacy BIOS, a serial console, and no network interface or host directory:
+
+```sh
+qemu-system-x86_64 \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -m 1024 \
+  -drive file=.artifacts/harness-smoke.qcow2,format=qcow2,if=virtio \
+  -nic none \
+  -nographic \
+  -no-reboot
+```
+
+A successful boot reaches the multi-user target, prints the following readiness
+message, and displays `harness login:`:
+
+```text
+harness readiness: uid=900 gid=900 state-directory=writable
+```
+
+Login is intentionally locked. Exit QEMU by pressing `Ctrl-A`, then `X`. From
+another terminal, `pgrep -af harness-smoke.qcow2` shows whether this test VM is
+still running. The image derivation evaluates against the pinned Nixpkgs
+revision; repeat this smoke test after rebuilding the image.
 
 ## Development container
 

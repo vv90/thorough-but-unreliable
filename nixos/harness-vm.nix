@@ -1,4 +1,4 @@
-{ modulesPath, ... }:
+{ modulesPath, pkgs, ... }:
 
 {
   imports = [
@@ -43,5 +43,38 @@
   # Acknowledge intentional lockout; this does not unlock the root password.
   users.allowNoPasswordLogin = true;
   users.users.root.hashedPassword = "!";
+
+  users.groups.harness.gid = 900;
+  users.users.harness = {
+    isSystemUser = true;
+    uid = 900;
+    group = "harness";
+    home = "/var/lib/harness";
+    hashedPassword = "!";
+    shell = pkgs.shadow;
+  };
+
+  systemd.services.harness-readiness = {
+    description = "Verify the harness service account";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" ];
+    script = ''
+      test "$(id -u)" = 900
+      test "$(id -g)" = 900
+      test -w /var/lib/harness
+      echo "harness readiness: uid=900 gid=900 state-directory=writable"
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      User = "harness";
+      Group = "harness";
+      StateDirectory = "harness";
+      StateDirectoryMode = "0700";
+      RemainAfterExit = true;
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+  };
+
   system.stateVersion = "26.05";
 }
