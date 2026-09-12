@@ -62,6 +62,53 @@ another terminal, `pgrep -af harness-smoke.qcow2` shows whether this test VM is
 still running. The image derivation evaluates against the pinned Nixpkgs
 revision; repeat this smoke test after rebuilding the image.
 
+### Test per-run configuration media
+
+Create a minimal manifest and place it in an ISO labeled `HARNESS_CONFIG`:
+
+```sh
+mkdir -p .artifacts/harness-config
+printf '%s\n' '{"version":1,"run_id":"smoke"}' \
+  > .artifacts/harness-config/manifest.json
+nix shell nixpkgs#xorriso --command xorrisofs \
+  -quiet \
+  -volid HARNESS_CONFIG \
+  -joliet \
+  -rock \
+  -output .artifacts/harness-config.iso \
+  .artifacts/harness-config
+```
+
+Create a fresh overlay as described above, then add this drive to the QEMU
+command:
+
+```sh
+-drive file=.artifacts/harness-config.iso,format=raw,media=cdrom,readonly=on
+```
+
+The guest mounts the ISO at `/run/harness-config` with `ro`, `nosuid`, `nodev`
+and `noexec`. A successful check prints:
+
+```text
+harness config: manifest validated run_id="smoke"
+```
+
+Without an attached configuration ISO, the guest still boots and prints
+`harness config: no configuration media attached`. An attached manifest must be
+a JSON object containing exactly `version` and `run_id`; `version` must equal
+`1`, and `run_id` must be a nonempty string.
+
+For convenience, the following wrapper runs the complete build, manifest, ISO,
+fresh-overlay and QEMU sequence above:
+
+```sh
+./scripts/run-harness-smoke.sh
+```
+
+It creates a unique directory under `.artifacts` for each invocation. The
+commands in this README remain the source of truth; keep the wrapper synchronized
+with them when the workflow changes.
+
 ## Development container
 
 Copy these files into the new `thorough-but-unreliable` repository. Merge the flake outputs

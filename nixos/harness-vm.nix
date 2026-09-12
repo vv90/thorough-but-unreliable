@@ -76,5 +76,56 @@
     };
   };
 
+  systemd.mounts = [
+    {
+      description = "Harness per-run configuration";
+      what = "/dev/disk/by-label/HARNESS_CONFIG";
+      where = "/run/harness-config";
+      type = "iso9660";
+      options = "ro,nosuid,nodev,noexec";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "harness-config-check.service" ];
+      unitConfig.ConditionPathExists = "/dev/disk/by-label/HARNESS_CONFIG";
+    }
+  ];
+
+  systemd.services.harness-config-check = {
+    description = "Check the harness per-run configuration";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "local-fs.target" ];
+    script = ''
+      if ! test -e /dev/disk/by-label/HARNESS_CONFIG; then
+        echo "harness config: no configuration media attached"
+        exit 0
+      fi
+
+      manifest=/run/harness-config/manifest.json
+      if ! test -r "$manifest" || ! test -s "$manifest"; then
+        echo "harness config: manifest.json missing, unreadable, or empty" >&2
+        exit 1
+      fi
+
+      if ! ${pkgs.jq}/bin/jq -e '
+        type == "object"
+        and keys == ["run_id", "version"]
+        and .version == 1
+        and (.run_id | type == "string" and length > 0)
+      ' "$manifest" > /dev/null; then
+        echo "harness config: invalid version-one manifest" >&2
+        exit 1
+      fi
+
+      run_id="$(${pkgs.jq}/bin/jq -c '.run_id' "$manifest")"
+      echo "harness config: manifest validated run_id=$run_id"
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      User = "harness";
+      Group = "harness";
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+  };
+
   system.stateVersion = "26.05";
 }
