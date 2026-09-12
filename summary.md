@@ -707,7 +707,7 @@ the host by design.
 The proposal is saved in `temp/framework-devcontainer/` beside this handoff:
 `flake.nix`, `flake.lock`, `.devcontainer/devcontainer.json` and README.
 Copy/merge it into the new repository.
-Use its Nix-built OCI image, currently version `0.4.0`, instead of the earlier
+Use its Nix-built OCI image, currently version `latest`, instead of the earlier
 Debian Dockerfile approach. Build/load manually using the README commands;
 automation and image-identity recording are deferred. No image has been loaded
 or runtime-tested during handoff preparation.

@@ -1,4 +1,29 @@
-# thorough-but-unreliable devcontainer
+# thorough-but-unreliable
+
+## Harness base image
+
+`nixos/harness-vm.nix` defines the initial x86_64 NixOS guest. The flake exposes
+`nixosConfigurations.harness` and `packages.x86_64-linux.harness-image`.
+It produces `harness.qcow2`, with its runtime Nix store inside the disk,
+legacy BIOS/GRUB boot, an 8 GiB virtual disk, and diagnostics on serial port 0
+at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled.
+The application and the two network interfaces are not configured yet.
+
+On the external Linux builder with KVM available:
+
+```sh
+nix build .#harness-image --out-link result-harness
+```
+
+The image builder itself requires KVM. This unprivileged devcontainer can
+evaluate the derivation but cannot assemble or boot it locally.
+The output disk is `result-harness/harness.qcow2`. Boot validation must use a
+disposable overlay, a virtio disk, legacy BIOS, a serial console, and no NICs
+or shared host directories. Successful boot means reaching the systemd
+multi-user target without failed units. The image derivation evaluates against
+the pinned Nixpkgs revision; build and boot validation are pending.
+
+## Development container
 
 Copy these files into the new `thorough-but-unreliable` repository. Merge the flake outputs
 with that project's flake rather than replacing an existing application flake.
@@ -9,8 +34,8 @@ the pinned revision. Image building and editor attachment still need validation.
 
 ## Applied changes
 
-- Image reference: `localhost/thorough-but-unreliable-dev:0.4.0`. Bump both the
-  flake version and devcontainer reference when publishing a changed image.
+- Image reference: `localhost/thorough-but-unreliable-dev:latest`. Use the
+  `latest` tag for now; rebuild, load and recreate after image changes.
 - Start with private Nix, Nix editing tools, and basic editor/CLI utilities.
   Python, uv, pytest, Ruff and Pyright are deferred until the base image works.
 - A dedicated Codex state volume is persisted; no tool-cache volumes are added.
@@ -28,7 +53,7 @@ podman load < result
 ```
 
 Nix creates `result` as a symlink to the image archive in the Nix store. Podman
-loads that archive as `localhost/thorough-but-unreliable-dev:0.4.0`, matching the
+loads that archive as `localhost/thorough-but-unreliable-dev:latest`, matching the
 devcontainer configuration. Then open or recreate the devcontainer in your
 editor; loading an image does not update an existing container.
 
