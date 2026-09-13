@@ -43,5 +43,7 @@ exec qemu-system-x86_64 \
   -drive "file=$overlay,format=qcow2,if=virtio" \
   -drive "file=$config_iso,format=raw,media=cdrom,readonly=on" \
   -nic none \
+  -device virtio-net-pci,mac=52:54:00:99:01:02 \
+  -device virtio-net-pci,mac=52:54:00:99:02:01 \
   -nographic \
   -no-reboot

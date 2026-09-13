@@ -9,7 +9,8 @@ legacy BIOS/GRUB boot, an 8 GiB virtual disk, and diagnostics on serial port 0
 at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled. A
 noninteractive `harness` service account owns `/var/lib/harness`; a boot-time
 readiness unit verifies its fixed UID/GID and state-directory access.
-The application and the two network interfaces are not configured yet.
+The two MAC-matched interfaces use fixed addresses with no default route or
+DNS. The application is not configured yet.
 
 On the external Linux builder with KVM available:
 
@@ -36,7 +37,8 @@ qemu-img create \
 ```
 
 Use a fresh overlay filename for each test. Start the guest with a virtio disk,
-legacy BIOS, a serial console, and no network interface or host directory:
+legacy BIOS, a serial console, two disconnected virtio network interfaces, and
+no host directory:
 
 ```sh
 qemu-system-x86_64 \
@@ -46,6 +48,8 @@ qemu-system-x86_64 \
   -m 1024 \
   -drive file=.artifacts/harness-smoke.qcow2,format=qcow2,if=virtio \
   -nic none \
+  -device virtio-net-pci,mac=52:54:00:99:01:02 \
+  -device virtio-net-pci,mac=52:54:00:99:02:01 \
   -nographic \
   -no-reboot
 ```
@@ -55,7 +59,13 @@ message, and displays `harness login:`:
 
 ```text
 harness readiness: uid=900 gid=900 state-directory=writable
+harness network: inference0=10.99.1.2/24 command0=10.99.2.1/30 default-route=none dns=none
 ```
+
+`-nic none` suppresses QEMU's automatic user-mode network and its implicit NAT.
+The two explicit devices have no host network backend in this smoke test. Their
+MAC addresses let the guest name and configure them independently of PCI probe
+order: `inference0` is `10.99.1.2/24`, and `command0` is `10.99.2.1/30`.
 
 Login is intentionally locked. Exit QEMU by pressing `Ctrl-A`, then `X`. From
 another terminal, `pgrep -af harness-smoke.qcow2` shows whether this test VM is
