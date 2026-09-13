@@ -10,7 +10,16 @@ at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled. A
 noninteractive `harness` service account owns `/var/lib/harness`; a boot-time
 readiness unit verifies its fixed UID/GID and state-directory access.
 The two MAC-matched interfaces use fixed addresses with no default route or
-DNS. The application is not configured yet.
+DNS. The image contains the initial Rust `harness` binary; its boot-time
+configuration unit uses that binary to validate the per-run manifest. The
+model/tool loop is not implemented yet.
+
+The current application direction is a small Rust harness with a custom
+model/tool loop. It will call the host's OpenAI-compatible Ollama endpoint,
+expose `execute_target_command` and `submit` to the model, and send target
+commands through the experiment broker. Inspect AI remains an option for a
+later evaluation layer; it is not a planned runtime dependency for the first
+end-to-end trial. See [summary.md](summary.md) for the broader architecture.
 
 On the external Linux builder with KVM available:
 
@@ -106,7 +115,16 @@ harness config: manifest validated run_id="smoke"
 Without an attached configuration ISO, the guest still boots and prints
 `harness config: no configuration media attached`. An attached manifest must be
 a JSON object containing exactly `version` and `run_id`; `version` must equal
-`1`, and `run_id` must be a nonempty string.
+`1`, and `run_id` must be a nonempty string. The typed Rust loader enforces this
+schema. It can also be run directly as:
+
+```sh
+nix run .#harness -- check-config --manifest PATH
+```
+
+That two-field manifest remains the current boot-smoke schema. Add only the
+fields needed to launch the harness, then update this section and the
+convenience script when that schema changes.
 
 For convenience, the following wrapper runs the complete build, manifest, ISO,
 fresh-overlay and QEMU sequence above:
@@ -132,8 +150,8 @@ the pinned revision. Image building and editor attachment still need validation.
 
 - Image reference: `localhost/thorough-but-unreliable-dev:latest`. Use the
   `latest` tag for now; rebuild, load and recreate after image changes.
-- Start with private Nix, Nix editing tools, and basic editor/CLI utilities.
-  Python, uv, pytest, Ruff and Pyright are deferred until the base image works.
+- The development image includes the Rust compiler, Cargo, rustfmt, Clippy and
+  rust-analyzer from the flake's pinned Nixpkgs revision.
 - A dedicated Codex state volume is persisted; no tool-cache volumes are added.
   No full home, host caches, host credentials, runtime sockets or devices are mounted.
   The source checkout is deliberately writable.
@@ -252,8 +270,8 @@ in the private store. These are acceptance checks, not results already obtained.
   in editor settings and verified in the resulting container.
 - Authoritative package checks and VM integration run externally against a
   recorded source snapshot, without exposing host Nix/libvirt/Podman sockets.
-- Add language tools and scoped cache volumes incrementally after validating
-  the base image. Decide retention/quotas when adding persistent caches.
+- Add scoped cache volumes only when their benefit justifies persistence, then
+  decide their retention and quotas.
 
 No host configuration or running development environment is changed by saving
 this proposal. Validate it with the chosen editor and rootless Podman before use.

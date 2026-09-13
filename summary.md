@@ -3,7 +3,8 @@
 ## Purpose
 
 Project/repository name: `thorough-but-unreliable`.
-Use `thorough_but_unreliable` for Python package/import names.
+Use `thorough-but-unreliable` for Cargo package names and
+`thorough_but_unreliable` for Rust crate and module identifiers.
 
 Build a small, reproducible framework for evaluating Nix-defined isolation
 environments such as containers, namespaces, userspaces, and nested KVM VMs.
@@ -35,7 +36,7 @@ physical NixOS host
 ├── nginx inference gateway on the inference network
 │
 ├── harness VM
-│   ├── Inspect AI runner
+│   ├── Rust harness runner and custom model/tool loop
 │   ├── inference client
 │   └── experiment-command client
 │
@@ -47,8 +48,8 @@ physical NixOS host
         └── nested L2 KVM VM
 ```
 
-This replaces the earlier idea of putting the Inspect runner and target in the
-one VM. The paired design gives the runner no direct filesystem or process
+This replaces the earlier idea of putting the harness runner and target in one
+VM. The paired design gives the runner no direct filesystem or process
 access to the experiment VM, its parent environment, or its evidence nonce.
 
 The experiment environment is the immediate parent of the designated target.
@@ -57,9 +58,13 @@ physical experiment machine can instead host that target directly. Record this
 distinction because nested and physical execution are different test conditions.
 The workstation hosting inference and the controller is not the experiment.
 
-These are design decisions for the new project, not implemented framework
-features. The latest review inspected configuration files, not the running host.
-Only this handoff is being updated; no host configuration changes were requested.
+The broader architecture remains a current direction rather than a fixed
+requirement. The harness base image is implemented and has been manually boot
+tested with its service account, fixed disconnected interfaces, and read-only
+configuration ISO. The first Rust package and strict typed loader for the
+current two-field manifest are implemented and included in the image. The
+model/tool loop, experiment image, broker, controller, and connected-network
+trial are not implemented yet.
 
 ## Repository and flake ownership
 
@@ -96,7 +101,7 @@ guest images automatically.
 
 ### Harness VM
 
-- Runs Inspect AI and the model/tool loop.
+- Runs the packaged Rust harness and custom model/tool loop.
 - Calls the host inference gateway.
 - Sends a single kind of operation to the experiment broker: execute a command in
   the designated target.
@@ -341,8 +346,9 @@ The harness should use:
 export OLLAMA_BASE_URL=http://10.99.1.1:11434/v1
 ```
 
-For Inspect AI, the model identifier is `ollama/<ollama-model-name>`. The actual
-model has not yet been selected or pinned in the host repository.
+The harness sends the selected Ollama model name in the OpenAI-compatible
+request's `model` field. The actual model has not yet been selected or pinned
+in the host repository.
 
 ## Physical-host work still outstanding
 
@@ -380,51 +386,67 @@ separate host module is reasonable.
 
 ## Harness implementation
 
-Use a pinned Inspect AI release. It keeps project-specific runner code small
-while providing the ReAct loop, model-provider adapters, limits, epochs,
-structured logs, and later substitution of other model providers.
+Implement a small custom loop in Rust first. This keeps the first trial focused
+on the protocol and isolation boundary, while leaving the loop behavior visible
+and easy to change. Inspect AI remains a possible later evaluation and logging
+layer; it is not an application or runtime dependency.
 
 The harness task consists of:
 
-1. A scenario/sample manifest.
-2. A system prompt explaining the environment-isolation objective.
-3. One `execute_target_command` tool.
-4. Inspect's ReAct agent with explicit submission.
+1. A validated run manifest and system prompt.
+2. An OpenAI-compatible inference client using non-streaming
+   `POST /v1/chat/completions` initially.
+3. Two model-visible tools: `execute_target_command` and `submit`.
+4. A loop that records each model response, executes requested target commands,
+   appends their results to the conversation, and requests the next model turn.
 5. Strict message, token, tool-output, command, and wall-clock limits.
-6. Event export to the physical-host collector.
+6. Structured event export to the physical-host collector.
 
-Do not initially implement an Inspect `SandboxEnvironment`. The custom command
-tool should call the experiment broker directly. A custom sandbox adapter can
-be added later if compatibility with Inspect's standard tools becomes useful.
+Execute command calls serially and in the order returned by the model. Do not
+automatically retry inference or command requests. A transport failure after a
+request is sent may represent uncertain completion and must be recorded as
+such. An explicit `submit` call ends the sample. A response with neither a tool
+call nor a submission ends as an early termination. Treat a response that mixes
+`submit` with command calls as a model protocol error so termination is
+deterministic.
 
-Illustrative initial invocation; verify flags against the pinned Inspect release:
+Keep conversation compaction, retry/reflection memory, parallel tool execution,
+and provider abstraction out of the first version. Run samples sequentially
+because Ollama is configured for one parallel request. Record the exact system
+prompt, tool schemas, model settings, limits, and loop behavior with every run.
+
+The initial service entry point should be equivalent to:
 
 ```sh
-export OLLAMA_BASE_URL=http://10.99.1.1:11434/v1
-
-inspect eval isolation_task.py \
-  --model ollama/<model-name> \
-  --max-connections 1 \
-  --max-samples 1 \
-  --message-limit 40 \
-  --time-limit 600 \
-  --max-tokens 2048 \
-  --max-tool-output 16384
+harness run --manifest /run/harness-config/manifest.json
 ```
 
-Run samples sequentially initially because Ollama is configured for one
-parallel request. Keep conversation compaction disabled for early experiments
-so histories remain straightforward to compare.
+Use `serde` and `serde_json` for strict typed manifests, protocol messages, and
+events. Use Tokio and `reqwest` for bounded HTTP clients, with redirects
+disabled and explicit connection, response, and body limits. The experiment
+broker can use `axum` when it is added.
 
 ## Harness-to-experiment command protocol
 
-Expose only one model-visible tool:
+Expose two model-visible tools. Only `execute_target_command` can cause an
+operation in the experiment:
 
 ```json
 {
   "name": "execute_target_command",
   "arguments": {
     "command": "id; uname -a; cat /proc/self/status"
+  }
+}
+```
+
+The second tool terminates the loop with the model's answer:
+
+```json
+{
+  "name": "submit",
+  "arguments": {
+    "answer": "..."
   }
 }
 ```
@@ -487,7 +509,7 @@ The new repository should build separate immutable artifacts:
 
 ```text
 packages.x86_64-linux.harness
-    Inspect runner and harness command client
+    Rust custom-loop runner and harness command client
 
 packages.x86_64-linux.harness-image
     Reusable NixOS QCOW2 harness base image
@@ -508,7 +530,7 @@ nixosConfigurations.experiment
     Minimal NixOS experiment VM with selectable target profile
 
 checks.x86_64-linux.*
-    Formatting, typing, unit, protocol, and deterministic integration tests
+    Formatting, linting, unit, protocol, and deterministic integration tests
 
 devShells.x86_64-linux.default
     Development environment
@@ -517,10 +539,14 @@ nixosModules.controller
     Optional later host integration; does not automatically build or launch VMs
 ```
 
-Use `pyproject.toml` and `uv.lock` for Python dependency resolution, then use
-`uv2nix`/`pyproject.nix` to construct Nix closures. Neither VM should run
-`uv sync`, access PyPI, clone Git repositories, or otherwise fetch code during
-boot.
+Start with one Cargo package containing a shared library and the harness binary.
+Add broker and controller binaries to that package as they are implemented;
+split it into workspace crates only when dependency or privilege boundaries
+justify the extra structure. Check in `Cargo.toml` and `Cargo.lock`. Package
+the application with a Nixpkgs-pinned Rust toolchain and
+`rustPlatform.buildRustPackage` or an equivalent Nix build. Neither VM should
+run Cargo, access crates.io, clone Git repositories, or otherwise fetch code
+during boot.
 
 Use the pinned NixOS image tooling to produce QCOW2 outputs and wrap it behind
 the project's stable `harness-image` and `experiment-image` attributes. Validate
@@ -530,10 +556,10 @@ their full runtime closure without relying on host store sharing.
 
 ### Harness image and run configuration
 
-Use a minimal NixOS guest, built in the framework flake. Include Python, Inspect,
-the packaged application, a dedicated user, a systemd evaluation service,
-configuration loading, the two network interfaces, serial diagnostics and
-structured event export. Experiment-specific tools belong with the target.
+Use a minimal NixOS guest, built in the framework flake. Include the packaged
+Rust harness, a dedicated user, a systemd evaluation service, configuration
+loading, the two network interfaces, serial diagnostics and structured event
+export. Experiment-specific tools belong with the target.
 
 Rebuild the image when application code, dependencies or OS configuration
 changes. Supply run ID, scenario/prompt, model endpoint/settings, command
@@ -547,19 +573,21 @@ The harness configuration never includes the expected evidence nonce.
 
 ### Development, versioning and release workflow
 
-Test Python changes with fake endpoints first, then build the application
-package, build the VM image and boot a disposable integration instance. Image
-assembly has a cost even when Nix reuses unchanged dependencies.
+Test Rust changes with fake inference and broker endpoints first, then build the
+application package, build the VM image and boot a disposable integration
+instance. Image assembly has a cost even when Nix reuses unchanged dependencies.
 
-Proposed commands after implementing these flake outputs (not available yet):
+The harness package and image commands are available now:
 
 ```sh
 nix develop
-nix flake check
 nix build .#harness
 nix build .#harness-image --out-link result-harness
-nix run .#controller -- run scenarios/smoke.yaml
+nix run .#harness -- check-config --manifest PATH
 ```
+
+Add `nix flake check` checks and the controller command as their implementations
+arrive.
 
 Record the Git revision and lockfiles, Nix output store path, and exact image
 checksum. Record a source snapshot or digest for uncommitted development trees;
@@ -604,7 +632,7 @@ Recommended lifecycle:
 8. Launch a transient libvirt harness domain with resource limits, both NICs,
    configuration media and serial channels; wait for its preflight-ready event.
 9. Run network and broker negative controls.
-10. Start the Inspect sample while the physical host enforces an absolute
+10. Start the custom-loop sample while the physical host enforces an absolute
     deadline and collects events.
 11. Evaluate scenario evidence, including nonce comparison where applicable.
 12. Stop the harness, release/reset the experiment, and finalize collected
@@ -656,32 +684,40 @@ components; it should not require a model to discover a boundary condition.
 .
 ├── .devcontainer/
 │   └── devcontainer.json
+├── Cargo.toml
+├── Cargo.lock
 ├── flake.nix
 ├── flake.lock
-├── pyproject.toml
-├── uv.lock
 ├── nixos/
 │   ├── harness-vm.nix
 │   ├── experiment-vm.nix
 │   └── target-profiles/
-├── src/thorough_but_unreliable/
+├── src/
+│   ├── lib.rs
+│   ├── manifest.rs
+│   ├── protocol.rs
+│   ├── events.rs
 │   ├── harness/
-│   │   ├── task.py
-│   │   ├── tool.py
-│   │   └── experiment_client.py
+│   │   ├── mod.rs
+│   │   ├── model_loop.rs
+│   │   ├── model_client.rs
+│   │   └── experiment_client.rs
 │   ├── broker/
-│   │   ├── server.py
-│   │   ├── target.py
-│   │   └── evidence.py
+│   │   ├── mod.rs
+│   │   ├── server.rs
+│   │   ├── target.rs
+│   │   └── evidence.rs
 │   ├── controller/
-│   │   ├── lifecycle.py
-│   │   ├── images.py
-│   │   ├── networks.py
+│   │   ├── mod.rs
+│   │   ├── lifecycle.rs
+│   │   ├── images.rs
+│   │   ├── networks.rs
 │   │   ├── backends/
-│   │   └── verifier.py
-│   ├── protocol.py
-│   ├── manifest.py
-│   └── events.py
+│   │   └── verifier.rs
+│   └── bin/
+│       ├── harness.rs
+│       ├── experiment-broker.rs
+│       └── controller.rs
 ├── scenarios/
 │   └── smoke.yaml
 ├── tests/
@@ -744,18 +780,15 @@ no-new-privileges, bounded memory/PIDs and a bounded temporary filesystem.
 Network restrictions, editor forwarding/authentication, editor compatibility,
 resource enforcement still need host/runtime validation.
 
-Initial baseline: private Nix, Nix editing tools and basic editor/CLI utilities.
-Python, uv, pytest, Ruff and Pyright are deliberately omitted until the base
-image builds and editor attachment works. Add framework tools incrementally.
+The development image now includes private Nix, Nix editing tools, basic
+editor/CLI utilities, and the Rust tools needed by the first application
+increment.
 
-Future framework development tools (not part of the initial image):
+Current framework development tools include:
 
-- Python 3.12.
-- `uv` with a checked-in `uv.lock`.
-- Pinned `inspect-ai`, `openai`, and `httpx` dependencies.
-- `pytest` and `pytest-asyncio`.
-- `ruff` and `pyright`.
-- `git`, `curl`, `jq`, `bash`, `shellcheck`, `socat`, and `netcat`.
+- A Nixpkgs-pinned Rust compiler and Cargo.
+- `rustfmt`, Clippy, and `rust-analyzer`.
+- `git`, `curl`, `jq`, `bash`, and `shellcheck`.
 - Private Nix with flakes enabled, `nixfmt`, `nil`, statix and deadnix.
 - Optional `direnv`/`nix-direnv` for developer convenience.
 
@@ -795,41 +828,43 @@ default devcontainer can assemble every image.
 
 ## Initial milestones
 
-1. Define shared manifest, event, request, and response schemas.
-2. Implement and test HTTP/JSON limits, sequence handling, pair credentials and
-   uncertain completion without automatic retries.
-3. Implement the experiment broker against a fake target backend and prove it
+1. **Implemented; KVM smoke test pending:** Add the Cargo package, shared
+   manifest types, and a small harness binary that loads the configuration ISO
+   manifest. Package it with Nix and run it in the existing harness image.
+2. Implement the custom loop against scripted fake inference and broker
+   endpoints, covering command calls, tool results, explicit submission, early
+   termination, limits, and uncertain completion.
+3. Define shared command and event types, then implement and test HTTP/JSON
+   limits, sequence handling, pair credentials, and serial execution.
+4. Implement the experiment broker against a fake target adapter and prove it
    fails closed when the target is unavailable.
-4. Implement the single Inspect tool against a fake broker.
-5. Run a scripted fake model through a complete command/submission sequence.
-6. Implement the physical-host verifier with a nonce never supplied to the
-   harness fixture.
-7. Package the harness, broker, and controller in the separate framework flake;
-   define the allocation-backend contract and implement the local-VM backend.
-8. Build and boot the harness and experiment VM images independently.
-9. Create the point-to-point command network and perform one harmless paired-VM
-   command round trip.
-10. Connect the harness VM to the existing inference gateway and run one
-    tool-free model request.
-11. Add the first target profile, deterministic negative control, and seeded
-    isolation condition.
-12. Automate paired overlay creation, read-only run media, event collection,
-    inference scheduling, deadline enforcement, verification, and cleanup.
-13. Record exact image/source identities and validate reuse of a base image
-    across fresh instances with different run manifests. Add optional host
-    service integration and physical provisioning only when needed.
+5. Implement the physical-host verifier and deterministic negative control with
+   a nonce never supplied to the harness fixture.
+6. Build the experiment image with one target adapter and validate its broker
+   locally.
+7. Connect the two VM networks and verify the intended reachability matrix and
+   one harness-to-target command round trip.
+8. Connect the harness to Ollama and complete one real model tool-call and
+   submission sequence.
+9. Implement the minimal host controller needed to create run media and
+   overlays, start both VMs, collect events, enforce the deadline, verify
+   evidence, and clean up.
+10. Run and record the first end-to-end trial, then use what it reveals to
+    decide which abstractions and evaluation features are worth adding.
 
 ## Reference documentation
 
-- Inspect AI providers: https://inspect.aisi.org.uk/providers.html
-- Inspect ReAct agent: https://inspect.aisi.org.uk/react-agent.html
-- Inspect custom tools: https://inspect.aisi.org.uk/tools-custom.html
-- Inspect custom sandbox environments, for possible later use:
-  https://inspect.aisi.org.uk/extensions-sandboxes.html
+- Cargo packages and workspaces:
+  https://doc.rust-lang.org/cargo/reference/workspaces.html
+- Serde: https://serde.rs/
+- Tokio: https://tokio.rs/
+- reqwest: https://docs.rs/reqwest/
+- axum: https://docs.rs/axum/
+- Inspect AI, retained as a possible later evaluation layer:
+  https://inspect.aisi.org.uk/
 - Ollama OpenAI compatibility:
   https://docs.ollama.com/api/openai-compatibility
 - NixOS image building: https://nixos.org/manual/nixos/stable/
-- uv2nix: https://pyproject-nix.github.io/uv2nix/
 - Libvirt network XML: https://libvirt.org/formatnetwork.html
 - QEMU image overlays: https://www.qemu.org/docs/master/tools/qemu-img.html
 - nginx concurrency: https://nginx.org/en/docs/http/ngx_http_limit_conn_module.html

@@ -11,6 +11,21 @@
       pkgs = import nixpkgs { inherit system; };
       imageVersion = "latest";
 
+      harnessPackage = pkgs.rustPlatform.buildRustPackage {
+        pname = "thorough-but-unreliable";
+        version = "0.1.0";
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            ./Cargo.toml
+            ./Cargo.lock
+            ./src
+          ];
+        };
+        cargoLock.lockFile = ./Cargo.lock;
+        meta.mainProgram = "harness";
+      };
+
       # Private single-user Nix; no host store or daemon connection.
       developmentTools = with pkgs; [
         nix
@@ -42,6 +57,11 @@
         ncurses
         nodejs
         shellcheck
+        rustc
+        cargo
+        rustfmt
+        clippy
+        rust-analyzer
         codex
       ];
 
@@ -67,10 +87,12 @@
     {
       nixosConfigurations.harness = nixpkgs.lib.nixosSystem {
         inherit system;
+        specialArgs = { inherit harnessPackage; };
         modules = [ ./nixos/harness-vm.nix ];
       };
 
       packages.${system} = {
+        harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
 
         devImage = pkgs.dockerTools.buildLayeredImage {

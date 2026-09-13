@@ -1,4 +1,9 @@
-{ modulesPath, pkgs, ... }:
+{
+  harnessPackage,
+  modulesPath,
+  pkgs,
+  ...
+}:
 
 {
   imports = [
@@ -91,6 +96,8 @@
     hashedPassword = "!";
     shell = pkgs.shadow;
   };
+
+  environment.systemPackages = [ harnessPackage ];
 
   systemd.services.harness-readiness = {
     description = "Verify the harness service account";
@@ -218,18 +225,7 @@
         exit 1
       fi
 
-      if ! ${pkgs.jq}/bin/jq -e '
-        type == "object"
-        and keys == ["run_id", "version"]
-        and .version == 1
-        and (.run_id | type == "string" and length > 0)
-      ' "$manifest" > /dev/null; then
-        echo "harness config: invalid version-one manifest" >&2
-        exit 1
-      fi
-
-      run_id="$(${pkgs.jq}/bin/jq -c '.run_id' "$manifest")"
-      echo "harness config: manifest validated run_id=$run_id"
+      ${harnessPackage}/bin/harness check-config --manifest "$manifest"
     '';
     serviceConfig = {
       Type = "oneshot";
