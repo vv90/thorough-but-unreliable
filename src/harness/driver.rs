@@ -1,0 +1,58 @@
+//! Thin synchronous effect layer. HTTP adapters and async driving are deferred.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use super::{
+    model_loop::{Step, start},
+    types::{AssistantResponse, CommandCall, CommandResult, DependencyError, Message, RunReport},
+};
+
+pub trait ModelClient {
+    fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, DependencyError>;
+}
+
+pub trait CommandExecutor {
+    fn execute(&mut self, call: &CommandCall) -> Result<CommandResult, DependencyError>;
+}
+
+/// Invokes each requested effect once. Any dependency error ends the run;
+/// adapters must not silently retry requests either.
+pub fn run(
+    system_prompt: String,
+    task: String,
+    max_model_turns: u32,
+    model: &mut impl ModelClient,
+    executor: &mut impl CommandExecutor,
+) -> RunReport {
+    let mut step = start(system_prompt, task, max_model_turns);
+    loop {
+        step = match step {
+            Step::Model(turn) => {
+                let result = dependency_call(|| model.respond(turn.history()));
+                turn.complete(result)
+            }
+            Step::Command(turn) => {
+                let result = dependency_call(|| executor.execute(turn.call()));
+                turn.complete(result)
+            }
+            Step::Finished(report) => return report,
+        };
+    }
+}
+
+fn dependency_call<T>(
+    call: impl FnOnce() -> Result<T, DependencyError>,
+) -> Result<T, DependencyError> {
+    // Unwinding can leave an adapter in an inconsistent state. The driver
+    // terminates immediately in that case; the caller must discard the adapters.
+    // This cannot catch aborts, and does not replace the process panic hook.
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(payload) => {
+            // A foreign panic payload can itself panic in Drop. Retain it rather
+            // than risking a second unwind. This leaks only on dependency panic.
+            std::mem::forget(payload);
+            Err(DependencyError::Panicked)
+        }
+    }
+}

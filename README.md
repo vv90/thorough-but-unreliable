@@ -12,7 +12,8 @@ readiness unit verifies its fixed UID/GID and state-directory access.
 The two MAC-matched interfaces use fixed addresses with no default route or
 DNS. The image contains the initial Rust `harness` binary; its boot-time
 configuration unit uses that binary to validate the per-run manifest. The
-model/tool loop is not implemented yet.
+model/tool loop has a deterministic library core tested with scripted fakes;
+the VM does not run model requests yet.
 
 The current application direction is a small Rust harness with a custom
 model/tool loop. It will call the host's OpenAI-compatible Ollama endpoint,
@@ -136,6 +137,50 @@ fresh-overlay and QEMU sequence above:
 It creates a unique directory under `.artifacts` for each invocation. The
 commands in this README remain the source of truth; keep the wrapper synchronized
 with them when the workflow changes.
+
+## Deterministic harness core
+
+`src/harness/model_loop.rs` implements pure transitions: start with a system
+prompt, user task, and model-turn budget, then receive a model step, command
+step, or finished report. Each step is consumed when its result is supplied.
+`src/harness/types.rs` defines the internal messages and outcomes.
+`src/harness/driver.rs` is a thin synchronous driver over `ModelClient` and
+`CommandExecutor`; tests supply in-memory scripted implementations.
+
+The core validates each complete assistant response before executing commands.
+Call IDs must be nonempty and unique within that response. Commands execute in
+order; each result is appended with its call ID before another model request.
+Nonzero exits, signals, and command timeouts are results the model can observe.
+Dependency errors terminate immediately without retries, preserving uncertainty
+and the completed transcript. One submission finishes with its answer; multiple
+submissions or a mixture of submission and commands are protocol errors. A
+response with no tool calls ends as early termination.
+
+The turn budget bounds model calls. Zero permits no calls; all commands in the
+last allowed response finish before the budget prevents another model request.
+A submission or failure on that last turn keeps its specific outcome. HTTP,
+wall-clock/body/output limits, event export, and a `harness run` CLI are future
+increments. The existing VM smoke test still exercises manifest loading.
+
+Dependency calls catch unwinding panics as explicit failures and stop. Discard
+the adapters after such a failure. Process aborts cannot be caught; the driver
+does not change the global panic hook. A caught panic payload is deliberately
+retained because its destructor could panic too.
+
+Run the core's property-based tests and lint checks in the pinned dev shell:
+
+```sh
+nix develop --command cargo test --locked
+nix develop --command cargo clippy --locked --all-targets -- -D warnings
+nix develop --command cargo fmt --check
+```
+
+Properties cover ordered/correlated command results, complete transcripts,
+deterministic replay, exact submission, early termination, validation before
+effects, the model-turn budget, and stopping without retries on dependency
+failures. Generated inputs include Unicode text, command completion statuses,
+and failures with uncertain completion. Proptest is a development dependency;
+test assertion failures are reported by the test framework.
 
 ## Development container
 

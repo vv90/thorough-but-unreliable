@@ -63,8 +63,9 @@ requirement. The harness base image is implemented and has been manually boot
 tested with its service account, fixed disconnected interfaces, and read-only
 configuration ISO. The first Rust package and strict typed loader for the
 current two-field manifest are implemented and included in the image. The
-model/tool loop, experiment image, broker, controller, and connected-network
-trial are not implemented yet.
+deterministic model/tool loop core and thin synchronous driver are implemented
+and tested with in-memory fakes. HTTP clients, experiment image, broker,
+controller, and connected-network trial are not implemented yet.
 
 ## Repository and flake ownership
 
@@ -828,12 +829,14 @@ default devcontainer can assemble every image.
 
 ## Initial milestones
 
-1. **Implemented; KVM smoke test pending:** Add the Cargo package, shared
-   manifest types, and a small harness binary that loads the configuration ISO
-   manifest. Package it with Nix and run it in the existing harness image.
-2. Implement the custom loop against scripted fake inference and broker
-   endpoints, covering command calls, tool results, explicit submission, early
-   termination, limits, and uncertain completion.
+1. **Complete:** Add the Cargo package, shared manifest types, and a small
+   harness binary that loads the configuration ISO manifest. Package it with
+   Nix and run it in the existing harness image. The rebuilt image passed its
+   KVM smoke test.
+2. **Core implemented:** Pure loop transitions and a thin synchronous driver
+   are tested with in-memory scripted inference and command fakes, including
+   ordering, submission, early termination, model-turn limits, and uncertain
+   completion. HTTP endpoints and remaining resource limits are still pending.
 3. Define shared command and event types, then implement and test HTTP/JSON
    limits, sequence handling, pair credentials, and serial execution.
 4. Implement the experiment broker against a fake target adapter and prove it

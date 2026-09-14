@@ -69,8 +69,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_current_manifest() {
-        let manifest = parse(r#"{"version":1,"run_id":"smoke"}"#).unwrap();
+    fn accepts_the_current_manifest() -> Result<(), ManifestError> {
+        let manifest = parse(r#"{"version":1,"run_id":"smoke"}"#)?;
 
         assert_eq!(
             manifest,
@@ -79,40 +79,41 @@ mod tests {
                 run_id: "smoke".into(),
             }
         );
+        Ok(())
     }
 
     #[test]
     fn rejects_unknown_fields() {
-        let error = parse(r#"{"version":1,"run_id":"smoke","extra":true}"#).unwrap_err();
+        let result = parse(r#"{"version":1,"run_id":"smoke","extra":true}"#);
 
-        assert!(matches!(error, ManifestError::Parse(_)));
+        assert!(matches!(result, Err(ManifestError::Parse(_))));
     }
 
     #[test]
     fn rejects_missing_fields() {
-        let error = parse(r#"{"version":1}"#).unwrap_err();
+        let result = parse(r#"{"version":1}"#);
 
-        assert!(matches!(error, ManifestError::Parse(_)));
+        assert!(matches!(result, Err(ManifestError::Parse(_))));
     }
 
     #[test]
     fn rejects_wrong_field_types() {
-        let error = parse(r#"{"version":1,"run_id":42}"#).unwrap_err();
+        let result = parse(r#"{"version":1,"run_id":42}"#);
 
-        assert!(matches!(error, ManifestError::Parse(_)));
+        assert!(matches!(result, Err(ManifestError::Parse(_))));
     }
 
     #[test]
     fn rejects_unsupported_versions() {
-        let error = parse(r#"{"version":2,"run_id":"smoke"}"#).unwrap_err();
+        let result = parse(r#"{"version":2,"run_id":"smoke"}"#);
 
-        assert!(matches!(error, ManifestError::UnsupportedVersion(2)));
+        assert!(matches!(result, Err(ManifestError::UnsupportedVersion(2))));
     }
 
     #[test]
     fn rejects_an_empty_run_id() {
-        let error = parse(r#"{"version":1,"run_id":""}"#).unwrap_err();
+        let result = parse(r#"{"version":1,"run_id":""}"#);
 
-        assert!(matches!(error, ManifestError::EmptyRunId));
+        assert!(matches!(result, Err(ManifestError::EmptyRunId)));
     }
 }
