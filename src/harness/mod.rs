@@ -4,6 +4,7 @@ pub mod async_driver;
 pub mod driver;
 pub mod inference;
 pub mod model_loop;
+pub mod presentation;
 pub mod types;
 
 #[cfg(test)]

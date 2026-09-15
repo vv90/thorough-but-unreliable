@@ -5,7 +5,11 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::InferenceError;
-use crate::harness::types::{AssistantResponse, CommandStatus, Message, Tool, ToolCall};
+use crate::harness::{
+    presentation::command_report_view,
+    types::{AssistantResponse, Message, Tool, ToolCall},
+};
+use crate::target::SessionState;
 
 // Serde structs can otherwise accept JSON arrays positionally. Wire objects
 // and tool argument objects must actually be maps, including nested values.
@@ -102,21 +106,6 @@ struct SubmitArgs {
     answer: String,
 }
 
-#[derive(Serialize)]
-struct ResultContent<'a> {
-    stdout: &'a str,
-    stderr: &'a str,
-    status: ResultStatus,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ResultStatus {
-    Exited { code: i32 },
-    Signaled { signal: i32 },
-    TimedOut,
-}
-
 pub fn encode_request(
     model: &str,
     max_tokens: u32,
@@ -163,19 +152,16 @@ fn encode_message(message: &Message) -> Result<WireMessage, InferenceError> {
         },
         Message::Tool { call_id, result } => {
             let result = result.as_ref().map_err(|_| {
-                InferenceError::InvalidHistory("cannot resume after a dependency failure")
+                InferenceError::InvalidHistory("cannot resume after a command-client failure")
             })?;
+            if result.session_state() == SessionState::Unusable {
+                return Err(InferenceError::InvalidHistory(
+                    "cannot resume an unusable target session",
+                ));
+            }
             WireMessage::Tool {
-                tool_call_id: call_id.clone(),
-                content: serde_json::to_string(&ResultContent {
-                    stdout: &result.stdout,
-                    stderr: &result.stderr,
-                    status: match result.status {
-                        CommandStatus::Exited { code } => ResultStatus::Exited { code },
-                        CommandStatus::Signaled { signal } => ResultStatus::Signaled { signal },
-                        CommandStatus::TimedOut => ResultStatus::TimedOut,
-                    },
-                })?,
+                tool_call_id: call_id.as_str().to_owned(),
+                content: serde_json::to_string(&command_report_view(result))?,
             }
         }
     })

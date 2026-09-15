@@ -63,7 +63,7 @@ use std::{fmt, future::Future, num::NonZeroU32};
 /// fn accepts_send_future(_: impl std::future::Future<Output = ExecutionReport> + Send) {}
 /// let mut session = UnavailableTarget;
 /// accepts_send_future(session.execute(CommandRequest {
-///     sequence: 1,
+///     sequence: CommandSequence::new(1),
 ///     command: "id".into(),
 /// }));
 /// ```
@@ -76,7 +76,7 @@ pub trait TargetSession {
 pub struct CommandRequest {
     /// Broker-assigned identifier, scoped to this run. Sequence rules are the
     /// broker protocol's responsibility; arithmetic must never wrap.
-    pub sequence: u64,
+    pub sequence: CommandSequence,
     /// Shell text interpreted only inside the target. An adapter must reject
     /// unrepresentable input (e.g. NUL in argv) before dispatch, without rewriting it.
     pub command: String,
@@ -86,13 +86,35 @@ pub struct CommandRequest {
 /// These are internal types, not a serialized HTTP or guest-channel schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionReport {
-    pub sequence: u64,
+    pub sequence: CommandSequence,
     pub outcome: ExecutionOutcome,
 }
 
 impl ExecutionReport {
     pub fn session_state(&self) -> SessionState {
         self.outcome.session_state()
+    }
+}
+
+/// Broker-assigned number scoped to a run, distinct from model tool-call IDs.
+/// The broker chooses the first value and enforces ordering; increment never wraps.
+///
+/// ```compile_fail
+/// use thorough_but_unreliable::{target::CommandSequence, harness::types::ToolCallId};
+/// let tool_id: ToolCallId = CommandSequence::new(1);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CommandSequence(u64);
+
+impl CommandSequence {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+    pub fn checked_next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
     }
 }
 
@@ -115,7 +137,7 @@ impl ExecutionReport {
 /// ```compile_fail
 /// use thorough_but_unreliable::target::*;
 /// let report = ExecutionReport {
-///     sequence: 1,
+///     sequence: CommandSequence::new(1),
 ///     outcome: ExecutionOutcome::NotStarted(StartFailure::SessionUnusable),
 ///     stdout: CapturedOutput::default(),
 /// };

@@ -6,21 +6,25 @@ use futures_util::FutureExt;
 
 use super::{
     model_loop::{Step, start},
-    types::{AssistantResponse, CommandCall, CommandResult, DependencyError, Message, RunReport},
+    types::{AssistantResponse, CommandCall, CommandClientError, Message, ModelFailure, RunReport},
 };
+
+use crate::target::ExecutionReport;
 
 pub trait ModelClient {
     fn respond(
         &mut self,
         history: &[Message],
-    ) -> impl Future<Output = Result<AssistantResponse, DependencyError>> + Send;
+    ) -> impl Future<Output = Result<AssistantResponse, ModelFailure>> + Send;
 }
 
+/// The client assigns broker sequences and validates response correlation before
+/// returning a report. Transport/decoding failures return CommandClientError.
 pub trait CommandExecutor {
     fn execute(
         &mut self,
         call: &CommandCall,
-    ) -> impl Future<Output = Result<CommandResult, DependencyError>> + Send;
+    ) -> impl Future<Output = Result<ExecutionReport, CommandClientError>> + Send;
 }
 
 /// Await each requested effect once, in order, with no driver retries.
@@ -40,11 +44,19 @@ pub async fn run(
             Step::Model(turn) => {
                 // Calling the adapter inside the guarded async block also
                 // catches panics during future construction, before its await.
-                let result = dependency_call(async { model.respond(turn.history()).await }).await;
+                let result = dependency_call(
+                    async { model.respond(turn.history()).await },
+                    ModelFailure::panicked,
+                )
+                .await;
                 turn.complete(result)
             }
             Step::Command(turn) => {
-                let result = dependency_call(async { executor.execute(turn.call()).await }).await;
+                let result = dependency_call(
+                    async { executor.execute(turn.call()).await },
+                    CommandClientError::panicked,
+                )
+                .await;
                 turn.complete(result)
             }
             Step::Finished(report) => return report,
@@ -52,16 +64,17 @@ pub async fn run(
     }
 }
 
-async fn dependency_call<T>(
-    future: impl Future<Output = Result<T, DependencyError>>,
-) -> Result<T, DependencyError> {
+async fn dependency_call<T, E>(
+    future: impl Future<Output = Result<T, E>>,
+    panicked: impl FnOnce() -> E,
+) -> Result<T, E> {
     match AssertUnwindSafe(future).catch_unwind().await {
         Ok(result) => result,
         Err(payload) => {
             // Foreign payload destructors can panic. Retain the payload, as in
             // the synchronous driver. Aborts and the global hook are unaffected.
             std::mem::forget(payload);
-            Err(DependencyError::Panicked)
+            Err(panicked())
         }
     }
 }

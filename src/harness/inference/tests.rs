@@ -11,6 +11,18 @@ use tokio::{
 
 use super::{InferenceClient, InferenceConfig, InferenceError, http::append_chunk, wire};
 use crate::harness::types::*;
+use crate::target::*;
+
+fn id(value: &str) -> Result<ToolCallId, EmptyToolCallId> {
+    ToolCallId::try_from(value.to_owned())
+}
+
+fn lost_reply() -> CommandClientError {
+    CommandClientError {
+        kind: CommandClientErrorKind::Transport,
+        diagnostic: Some("lost command reply".into()),
+    }
+}
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -44,11 +56,11 @@ fn command_response() -> Result<Vec<u8>, serde_json::Error> {
 proptest! {
     #[test]
     fn request_preserves_history_settings_and_exact_tool_arguments(
-        system in text(), task in text(), command in text(), stdout in text(), stderr in text(), code in any::<i32>(), tokens in 1u32..u32::MAX,
+        system in text(), task in text(), command in text(), stdout in text(), stderr in text(), code in any::<u8>(), tokens in 1u32..u32::MAX,
     ) {
         let history = vec![Message::System(system.clone()), Message::User(task.clone()),
             Message::Assistant(AssistantResponse { text: None, tool_calls: vec![ToolCall { id: "c".into(), tool: Tool::ExecuteTargetCommand { command: command.clone() } }] }),
-            Message::Tool { call_id: "c".into(), result: Ok(CommandResult { stdout: stdout.clone(), stderr: stderr.clone(), status: CommandStatus::Exited { code } }) }];
+            Message::Tool { call_id: id("c")?, result: Ok(text_result(&stdout, &stderr, code)) }];
         let bytes = wire::encode_request("test-model", tokens, &history)?;
         let value: Value = serde_json::from_slice(&bytes)?;
         prop_assert_eq!(field(&value, "/model")?, &json!("test-model"));
@@ -61,7 +73,7 @@ proptest! {
         prop_assert_eq!(serde_json::from_str::<Value>(args)?, json!({"command":command}));
         prop_assert_eq!(field(&value, "/messages/3/tool_call_id")?, &json!("c"));
         let result = field(&value, "/messages/3/content")?.as_str().ok_or_else(|| TestCaseError::fail("result must be a JSON string"))?;
-        prop_assert_eq!(serde_json::from_str::<Value>(result)?, json!({"stdout":stdout,"stderr":stderr,"status":{"kind":"exited","code":code}}));
+        prop_assert_eq!(serde_json::from_str::<Value>(result)?, json!({"sequence":1,"session_state":"ready","outcome":{"kind":"completed","output":{"stdout":{"encoding":"utf8","data":stdout,"truncated":false},"stderr":{"encoding":"utf8","data":stderr,"truncated":false}},"completion":{"kind":"exited","code":code,"source":"parent_observed"}}}));
         prop_assert_eq!(field(&value, "/tools/0/function/name")?, &json!("execute_target_command"));
         prop_assert_eq!(field(&value, "/tools/1/function/name")?, &json!("submit"));
         prop_assert_eq!(field(&value, "/tools/0/function/parameters/required")?, &json!(["command"]));
@@ -194,6 +206,70 @@ fn rejects_malformed_envelopes_and_truncated_or_ambiguous_completions() -> TestR
         ))?),
         Err(InferenceError::TruncatedResponse)
     ));
+    Ok(())
+}
+
+#[test]
+fn inference_failure_conversion_preserves_categories_payloads_and_diagnostics() -> TestResult {
+    let json_error = serde_json::from_slice::<Value>(b"{")
+        .err()
+        .ok_or("expected JSON failure")?;
+    let allocation_error = Vec::<u8>::new()
+        .try_reserve(usize::MAX)
+        .err()
+        .ok_or("expected allocation failure")?;
+    for (error, kind) in [
+        (
+            InferenceError::Configuration("bad model".into()),
+            ModelFailureKind::Configuration,
+        ),
+        (
+            InferenceError::InvalidHistory("empty"),
+            ModelFailureKind::InvalidHistory,
+        ),
+        (InferenceError::Json(json_error), ModelFailureKind::Json),
+        (
+            InferenceError::InvalidResponse("wrong role"),
+            ModelFailureKind::InvalidResponse,
+        ),
+        (
+            InferenceError::UnsupportedTool("unexpected".into()),
+            ModelFailureKind::UnsupportedTool("unexpected".into()),
+        ),
+        (
+            InferenceError::TruncatedResponse,
+            ModelFailureKind::TokenLimit,
+        ),
+        (
+            InferenceError::HttpStatus(429),
+            ModelFailureKind::HttpStatus(429),
+        ),
+        (
+            InferenceError::RequestTooLarge { limit: 123 },
+            ModelFailureKind::RequestTooLarge { limit: 123 },
+        ),
+        (
+            InferenceError::ResponseTooLarge { limit: 456 },
+            ModelFailureKind::ResponseTooLarge { limit: 456 },
+        ),
+        (
+            InferenceError::Allocation(allocation_error),
+            ModelFailureKind::Allocation,
+        ),
+        (
+            InferenceError::DependencyPanicked,
+            ModelFailureKind::Panicked,
+        ),
+    ] {
+        let diagnostic = error.to_string();
+        let converted = ModelFailure::from(error);
+        assert_eq!(converted.kind, kind);
+        assert_eq!(converted.diagnostic, Some(diagnostic));
+        assert_eq!(
+            converted.completion_unknown(),
+            kind == ModelFailureKind::Panicked
+        );
+    }
     Ok(())
 }
 
@@ -466,24 +542,52 @@ async fn oversized_request_is_rejected_before_connecting() -> TestResult {
 #[derive(Default)]
 struct MemoryExecutor {
     calls: Vec<CommandCall>,
-    failure: Option<DependencyError>,
+    failure: Option<CommandClientError>,
 }
 
-fn fixed_result() -> CommandResult {
-    CommandResult {
-        stdout: "uid=900(harness)\n".into(),
-        stderr: "diagnostic\n".into(),
-        status: CommandStatus::Exited { code: 7 },
+fn text_result(stdout: &str, stderr: &str, code: u8) -> ExecutionReport {
+    ExecutionReport {
+        sequence: CommandSequence::new(1),
+        outcome: ExecutionOutcome::Completed {
+            output: CommandOutput {
+                stdout: CapturedOutput {
+                    bytes: stdout.as_bytes().to_vec(),
+                    truncated: false,
+                },
+                stderr: CapturedOutput {
+                    bytes: stderr.as_bytes().to_vec(),
+                    truncated: false,
+                },
+            },
+            completion: ProcessCompletion::Exited {
+                code,
+                source: CompletionSource::ParentObserved,
+            },
+            session_state: SessionState::Ready,
+        },
     }
 }
 
+fn fixed_result() -> ExecutionReport {
+    text_result("uid=900(harness)\n", "diagnostic\n", 7)
+}
+
 impl crate::harness::async_driver::CommandExecutor for MemoryExecutor {
-    async fn execute(&mut self, call: &CommandCall) -> Result<CommandResult, DependencyError> {
+    async fn execute(&mut self, call: &CommandCall) -> Result<ExecutionReport, CommandClientError> {
         tokio::task::yield_now().await;
         self.calls.push(call.clone());
         match &self.failure {
             Some(error) => Err(error.clone()),
-            None => Ok(fixed_result()),
+            None => {
+                let sequence =
+                    u64::try_from(self.calls.len()).map_err(|error| CommandClientError {
+                        kind: CommandClientErrorKind::Configuration,
+                        diagnostic: Some(error.to_string()),
+                    })?;
+                let mut report = fixed_result();
+                report.sequence = CommandSequence::new(sequence);
+                Ok(report)
+            }
         }
     }
 }
@@ -543,21 +647,27 @@ async fn async_loop_sends_ordered_results_then_records_submission() -> TestResul
         executor.calls,
         vec![
             CommandCall {
-                id: "call-1".into(),
+                id: id("call-1")?,
                 command: "id".into()
             },
             CommandCall {
-                id: "call-2".into(),
+                id: id("call-2")?,
                 command: "pwd".into()
             },
         ]
     );
     let mut expected = history();
     expected.push(Message::Assistant(wire::decode_response(&commands)?));
-    for call in &executor.calls {
+    for (index, call) in executor.calls.iter().enumerate() {
+        let mut result = fixed_result();
+        result.sequence = CommandSequence::new(
+            u64::try_from(index)?
+                .checked_add(1)
+                .ok_or("sequence overflow")?,
+        );
         expected.push(Message::Tool {
             call_id: call.id.clone(),
-            result: Ok(fixed_result()),
+            result: Ok(result),
         });
     }
     for (request, messages) in captured.iter().zip([history(), expected.clone()]) {
@@ -582,21 +692,21 @@ async fn async_loop_sends_ordered_results_then_records_submission() -> TestResul
 #[tokio::test(flavor = "current_thread")]
 async fn async_loop_preserves_history_and_classifies_inference_failures_without_retry() -> TestResult
 {
-    for (reply, unknown) in [
-        (Reply::Disconnect, true),
+    for (reply, expected_kind) in [
+        (Reply::Disconnect, ModelFailureKind::Transport),
         (
             Reply::Http {
                 status: 503,
                 body: vec![],
             },
-            false,
+            ModelFailureKind::HttpStatus(503),
         ),
         (
             Reply::Http {
                 status: 200,
                 body: b"invalid JSON".to_vec(),
             },
-            false,
+            ModelFailureKind::Json,
         ),
     ] {
         let commands = command_response()?;
@@ -625,23 +735,18 @@ async fn async_loop_preserves_history_and_classifies_inference_failures_without_
         let mut expected = history();
         expected.push(Message::Assistant(wire::decode_response(&commands)?));
         expected.push(Message::Tool {
-            call_id: "call-1".into(),
+            call_id: id("call-1")?,
             result: Ok(fixed_result()),
         });
         assert_eq!(report.history, expected);
         match report.outcome {
-            RunOutcome::DependencyFailure {
-                operation: Operation::Model,
-                error,
-            } => {
+            RunOutcome::ModelFailure(error) => {
+                assert_eq!(error.kind, expected_kind);
                 assert_eq!(
-                    matches!(error, DependencyError::CompletionUnknown(_)),
-                    unknown
+                    error.completion_unknown(),
+                    expected_kind == ModelFailureKind::Transport
                 );
-                assert!(matches!(
-                    error,
-                    DependencyError::Failed(_) | DependencyError::CompletionUnknown(_)
-                ));
+                assert!(error.diagnostic.is_some());
             }
             other => return Err(format!("unexpected outcome: {other:?}").into()),
         }
@@ -661,15 +766,11 @@ async fn async_loop_stops_for_command_failure_protocol_error_and_turn_limit() ->
         ),
         (
             false,
-            Some(DependencyError::CompletionUnknown(
-                "lost command reply".into(),
-            )),
+            Some(lost_reply()),
             1,
-            RunOutcome::DependencyFailure {
-                operation: Operation::Command {
-                    call_id: "call-1".into(),
-                },
-                error: DependencyError::CompletionUnknown("lost command reply".into()),
+            RunOutcome::CommandClientFailure {
+                call_id: id("call-1")?,
+                error: lost_reply(),
             },
         ),
     ] {
@@ -698,7 +799,7 @@ async fn async_loop_stops_for_command_failure_protocol_error_and_turn_limit() ->
             assert_eq!(
                 report.history.last(),
                 Some(&Message::Tool {
-                    call_id: "call-1".into(),
+                    call_id: id("call-1")?,
                     result: Err(error)
                 })
             );

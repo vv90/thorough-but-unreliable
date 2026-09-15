@@ -72,6 +72,7 @@ use a physical machine without changing the harness command interface.
     └── harness
         ├── types.rs
         ├── model_loop.rs
+        ├── presentation.rs
         ├── driver.rs
         ├── async_driver.rs
         ├── tests.rs
@@ -106,7 +107,10 @@ The typed manifest schema is deliberately limited to:
 ```
 
 It rejects missing, extra, or incorrectly typed fields, unsupported versions,
-and empty run IDs. The model loop is not started by the executable yet.
+and empty run IDs. `Manifest` fields are private; accessors expose the validated
+values. Pure `from_slice` and direct Serde deserialization both validate, while
+reader/file functions provide IO. Nonobjects, duplicate fields, and trailing JSON
+are rejected. The model loop is not started by the executable yet.
 
 ### Deterministic loop core
 
@@ -122,16 +126,29 @@ effect cannot be completed twice. The core validates a complete assistant
 response before allowing any command effect. It requires nonempty, unique call
 IDs within each response, executes commands serially in response order, and
 records each correlated result before requesting another model turn.
+Dispatched commands and tool messages use validated `ToolCallId`; raw assistant
+responses remain representable for diagnosis. Broker numbers use the distinct
+`CommandSequence`, with checked increment. The command client must assign those
+numbers and validate response correlation before returning a report.
 
 One `submit` call finishes with its answer. Multiple submissions or a response
 mixing submission and commands are protocol errors. A response without tool
 calls is early termination. A model-turn budget bounds model calls while still
-allowing every command in the last accepted response to finish.
+allowing commands in the last accepted response to finish while the target remains
+usable.
 
-Dependency failures stop immediately without retry and retain the completed
-transcript. Command transport failures can be marked as completion-unknown.
-Normal command outcomes, including nonzero exit, signal, and timeout, remain
-data that can be shown to the model.
+Model failures and command-client failures have separate typed errors/outcomes.
+Both stop immediately without retry. Tool messages retain complete target reports,
+including raw partial output, truncation, completion source, and uncertainty.
+Any unusable target report stops all later effects, even after a successful exit.
+Recoverable rejection and confirmed deadline termination can continue when the
+session is ready. Broker transport/decoding failures never masquerade as target
+reports. `TargetSessionUnusable` points to the recorded report through its tool ID.
+
+`presentation.rs` projects reports to model-facing JSON: output is UTF-8 text or
+lossless hex with explicit encoding and truncation flags. Completion source,
+error category, sequence, and readiness remain visible. The raw report stays in
+history; this is not the broker wire schema.
 
 `src/harness/driver.rs` is the current thin synchronous effect driver over
 `ModelClient` and `CommandExecutor`. It catches unwinding dependency panics,
@@ -172,9 +189,11 @@ connection and total-request timeouts, and request/response byte limits. It:
 
 The inference client is connected to the async loop driver and tested with a
 local fake HTTP server and in-memory command executor. Real Ollama remains
-untested. Transport errors map to completion-unknown loop failures, caught
-panics to `Panicked`, and other inference errors to `Failed` (failure to obtain
-a usable response, without implying the server did no computation).
+untested. Errors map to `ModelFailure` without erasing typed categories or
+payloads (status, tool name, limits). Transport failures and panics imply possible
+completion; other failures do not establish that the server did no computation.
+The encoder rejects tool histories containing command-client failures or terminal
+target reports.
 
 ### Target execution interface
 
@@ -221,6 +240,11 @@ separation of reusable input rejection from terminal session failures, and
 preservation of the adapter's readiness decision after known completion.
 Compile-fail doctests reject readiness overrides on uncertain outcomes and
 command output on a report whose command never started.
+Harness properties cover all target-outcome branches, no effects after an unusable
+report, exact retention of partial output and provenance, lossless presentation,
+validated IDs, and nonwrapping command sequences. Manifest properties check every
+parsing entry point; compile-fail examples block direct invalid construction and
+mixing command sequences with tool IDs.
 
 An additional generated-script property compares async and synchronous reports,
 model inputs, ordered command calls, and unconsumed scripts across suspension,

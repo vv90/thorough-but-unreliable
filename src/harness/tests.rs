@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use proptest::{prelude::*, test_runner::TestCaseError};
 
+use crate::target::*;
+
 use super::{
     driver::{CommandExecutor, ModelClient, run},
     model_loop::{Step, start},
@@ -12,29 +14,152 @@ fn text() -> impl Strategy<Value = String> {
     prop::collection::vec(any::<char>(), 0..32).prop_map(|chars| chars.into_iter().collect())
 }
 
-fn command_result() -> impl Strategy<Value = CommandResult> {
-    (
-        text(),
-        text(),
-        prop_oneof![
-            any::<i32>().prop_map(|code| CommandStatus::Exited { code }),
-            any::<i32>().prop_map(|signal| CommandStatus::Signaled { signal }),
-            Just(CommandStatus::TimedOut),
-        ],
-    )
-        .prop_map(|(stdout, stderr, status)| CommandResult {
-            stdout,
-            stderr,
-            status,
-        })
+fn id(value: impl Into<String>) -> Result<ToolCallId, EmptyToolCallId> {
+    ToolCallId::try_from(value.into())
 }
 
-fn failure() -> impl Strategy<Value = DependencyError> {
-    prop_oneof![
-        text().prop_map(DependencyError::Failed),
-        text().prop_map(DependencyError::CompletionUnknown),
-        Just(DependencyError::Panicked),
-    ]
+fn projected_bytes(value: &serde_json::Value) -> Result<Vec<u8>, TestCaseError> {
+    let encoding = value
+        .get("encoding")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TestCaseError::fail("missing encoding"))?;
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| TestCaseError::fail("missing data"))?;
+    match encoding {
+        "utf8" => Ok(data.as_bytes().to_vec()),
+        "hex" => {
+            if !data.len().is_multiple_of(2) {
+                return Err(TestCaseError::fail("odd hex length"));
+            }
+            data.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    let text = std::str::from_utf8(pair)?;
+                    Ok(u8::from_str_radix(text, 16)?)
+                })
+                .collect()
+        }
+        _ => Err(TestCaseError::fail("unknown encoding")),
+    }
+}
+
+fn command_result() -> impl Strategy<Value = ExecutionReport> {
+    let source = || {
+        prop_oneof![
+            Just(CompletionSource::ParentObserved),
+            Just(CompletionSource::GuestReported)
+        ]
+    };
+    (
+        prop::collection::vec(any::<u8>(), 0..64),
+        prop::collection::vec(any::<u8>(), 0..64),
+        any::<bool>(),
+        any::<bool>(),
+        any::<u64>(),
+        prop_oneof![
+            (any::<u8>(), source())
+                .prop_map(|(code, source)| ProcessCompletion::Exited { code, source }),
+            (any::<std::num::NonZeroU32>(), source())
+                .prop_map(|(signal, source)| ProcessCompletion::Signaled { signal, source }),
+        ],
+    )
+        .prop_map(
+            |(stdout, stderr, out_truncated, err_truncated, sequence, completion)| {
+                ExecutionReport {
+                    sequence: CommandSequence::new(sequence),
+                    outcome: ExecutionOutcome::Completed {
+                        output: CommandOutput {
+                            stdout: CapturedOutput {
+                                bytes: stdout,
+                                truncated: out_truncated,
+                            },
+                            stderr: CapturedOutput {
+                                bytes: stderr,
+                                truncated: err_truncated,
+                            },
+                        },
+                        completion,
+                        session_state: SessionState::Ready,
+                    },
+                }
+            },
+        )
+}
+
+fn model_failure() -> impl Strategy<Value = ModelFailure> {
+    (
+        prop_oneof![
+            Just(ModelFailureKind::Transport),
+            Just(ModelFailureKind::InvalidResponse),
+            Just(ModelFailureKind::Panicked)
+        ],
+        prop::option::of(text()),
+    )
+        .prop_map(|(kind, diagnostic)| ModelFailure { kind, diagnostic })
+}
+
+fn target_result() -> impl Strategy<Value = ExecutionReport> {
+    (command_result(), 0u8..8, any::<bool>(), text()).prop_map(
+        |(mut report, kind, ready, diagnostic)| {
+            let state = if ready {
+                SessionState::Ready
+            } else {
+                SessionState::Unusable
+            };
+            let error = ExecutionError {
+                kind: ExecutionErrorKind::Transport,
+                diagnostic: Some(diagnostic.clone()),
+            };
+            report.outcome = match report.outcome {
+                ExecutionOutcome::Completed {
+                    output, completion, ..
+                } => match kind {
+                    0 => ExecutionOutcome::Completed {
+                        output,
+                        completion,
+                        session_state: state,
+                    },
+                    1 => ExecutionOutcome::Unknown { output, error },
+                    2 => ExecutionOutcome::DeadlineExceeded {
+                        output,
+                        execution_state: ExecutionState::MayStillBeRunning,
+                    },
+                    3 => ExecutionOutcome::DeadlineExceeded {
+                        output,
+                        execution_state: ExecutionState::ConfirmedStopped {
+                            session_state: state,
+                        },
+                    },
+                    4 => ExecutionOutcome::NotStarted(StartFailure::Rejected(CommandRejection {
+                        kind: RejectionKind::InvalidCommand,
+                        diagnostic: Some(diagnostic),
+                    })),
+                    5 => ExecutionOutcome::NotStarted(StartFailure::Rejected(CommandRejection {
+                        kind: RejectionKind::CommandTooLarge,
+                        diagnostic: Some(diagnostic),
+                    })),
+                    6 => ExecutionOutcome::NotStarted(StartFailure::SessionUnusable),
+                    _ => ExecutionOutcome::NotStarted(StartFailure::Failed(error)),
+                },
+                other => other,
+            };
+            report
+        },
+    )
+}
+
+fn client_failure() -> impl Strategy<Value = CommandClientError> {
+    (
+        prop_oneof![
+            Just(CommandClientErrorKind::Transport),
+            Just(CommandClientErrorKind::InvalidResponse),
+            Just(CommandClientErrorKind::Panicked)
+        ],
+        prop::option::of(text()),
+    )
+        .prop_map(|(kind, diagnostic)| CommandClientError { kind, diagnostic })
 }
 
 fn commands(values: &[String]) -> AssistantResponse {
@@ -65,49 +190,51 @@ fn submission(answer: String) -> AssistantResponse {
 
 #[derive(Default)]
 struct ScriptedModel {
-    responses: VecDeque<Result<AssistantResponse, DependencyError>>,
+    responses: VecDeque<Result<AssistantResponse, ModelFailure>>,
     histories: Vec<Vec<Message>>,
 }
 
 impl ModelClient for ScriptedModel {
-    fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, DependencyError> {
+    fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, ModelFailure> {
         self.histories.push(history.to_vec());
-        self.responses
-            .pop_front()
-            .ok_or_else(|| DependencyError::Failed("model script exhausted".into()))?
+        self.responses.pop_front().ok_or_else(|| ModelFailure {
+            kind: ModelFailureKind::InvalidResponse,
+            diagnostic: Some("model script exhausted".into()),
+        })?
     }
 }
 
 #[derive(Default)]
 struct ScriptedExecutor {
-    results: VecDeque<Result<CommandResult, DependencyError>>,
+    results: VecDeque<Result<ExecutionReport, CommandClientError>>,
     calls: Vec<CommandCall>,
 }
 
 impl CommandExecutor for ScriptedExecutor {
-    fn execute(&mut self, call: &CommandCall) -> Result<CommandResult, DependencyError> {
+    fn execute(&mut self, call: &CommandCall) -> Result<ExecutionReport, CommandClientError> {
         self.calls.push(call.clone());
-        self.results
-            .pop_front()
-            .ok_or_else(|| DependencyError::Failed("executor script exhausted".into()))?
+        self.results.pop_front().ok_or_else(|| CommandClientError {
+            kind: CommandClientErrorKind::InvalidResponse,
+            diagnostic: Some("executor script exhausted".into()),
+        })?
     }
 }
 
 impl super::async_driver::ModelClient for ScriptedModel {
-    async fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, DependencyError> {
+    async fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, ModelFailure> {
         tokio::task::yield_now().await;
         ModelClient::respond(self, history)
     }
 }
 
 impl super::async_driver::CommandExecutor for ScriptedExecutor {
-    async fn execute(&mut self, call: &CommandCall) -> Result<CommandResult, DependencyError> {
+    async fn execute(&mut self, call: &CommandCall) -> Result<ExecutionReport, CommandClientError> {
         tokio::task::yield_now().await;
         CommandExecutor::execute(self, call)
     }
 }
 
-fn response() -> impl Strategy<Value = Result<AssistantResponse, DependencyError>> {
+fn response() -> impl Strategy<Value = Result<AssistantResponse, ModelFailure>> {
     prop_oneof![
         prop::collection::vec(text(), 1..5).prop_map(|values| Ok(commands(&values))),
         text().prop_map(|answer| Ok(submission(answer))),
@@ -120,16 +247,115 @@ fn response() -> impl Strategy<Value = Result<AssistantResponse, DependencyError
             response.tool_calls.extend(submission(answer).tool_calls);
             Ok(response)
         }),
-        failure().prop_map(Err),
+        model_failure().prop_map(Err),
     ]
 }
 
 proptest! {
     #[test]
+    fn presentation_preserves_output_and_provenance_and_wire_refuses_terminal_history(report in target_result()) {
+        let view = super::presentation::command_report_view(&report);
+        prop_assert_eq!(view.get("sequence"), Some(&serde_json::json!(report.sequence.get())));
+        match &report.outcome {
+            ExecutionOutcome::Completed { output, .. }
+            | ExecutionOutcome::DeadlineExceeded { output, .. }
+            | ExecutionOutcome::Unknown { output, .. } => {
+                for (name, captured) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+                    let projected = view.pointer(&format!("/outcome/output/{name}"))
+                        .ok_or_else(|| TestCaseError::fail("missing output"))?;
+                    prop_assert_eq!(projected_bytes(projected)?, captured.bytes.clone());
+                    prop_assert_eq!(projected.get("truncated"), Some(&serde_json::json!(captured.truncated)));
+                }
+            }
+            ExecutionOutcome::NotStarted(_) => prop_assert!(view.pointer("/outcome/output").is_none()),
+        }
+        if let ExecutionOutcome::Completed { completion, .. } = &report.outcome {
+            let source = match completion {
+                ProcessCompletion::Exited { code, source } => {
+                    prop_assert_eq!(view.pointer("/outcome/completion/code"), Some(&serde_json::json!(code)));
+                    prop_assert!(view.pointer("/outcome/completion/signal").is_none());
+                    source
+                }
+                ProcessCompletion::Signaled { signal, source } => {
+                    prop_assert_eq!(view.pointer("/outcome/completion/signal"), Some(&serde_json::json!(signal.get())));
+                    prop_assert!(view.pointer("/outcome/completion/code").is_none());
+                    source
+                }
+            };
+            let expected = match source {
+                CompletionSource::ParentObserved => "parent_observed",
+                CompletionSource::GuestReported => "guest_reported",
+            };
+            prop_assert_eq!(view.pointer("/outcome/completion/source"), Some(&serde_json::json!(expected)));
+        }
+        let history = vec![Message::Tool { call_id: id("c")?, result: Ok(report.clone()) }];
+        let request = super::inference::wire::encode_request("m", 10, &history);
+        if report.session_state() == SessionState::Ready {
+            let value: serde_json::Value = serde_json::from_slice(&request?)?;
+            let content = value.pointer("/messages/0/content").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| TestCaseError::fail("missing tool content"))?;
+            prop_assert_eq!(serde_json::from_str::<serde_json::Value>(content)?, view);
+        } else {
+            prop_assert!(matches!(request, Err(super::inference::InferenceError::InvalidHistory(_))));
+        }
+        prop_assert_eq!(history, vec![Message::Tool { call_id: id("c")?, result: Ok(report) }]);
+    }
+
+    #[test]
+    fn target_observations_are_preserved_and_unusable_sessions_allow_no_later_effects(
+        target in target_result(), harmless in command_result(), before in prop::collection::vec(text(), 0..5), budget in 1u32..4,
+    ) {
+        let mut values = before.clone();
+        values.extend(["observed".into(), "later".into()]);
+        let response = commands(&values);
+        let mut model = ScriptedModel { responses: VecDeque::from([Ok(response.clone()), Ok(submission("done".into()))]), ..Default::default() };
+        let mut executor = ScriptedExecutor::default();
+        let mut expected_history = vec![Message::System("s".into()), Message::User("t".into()), Message::Assistant(response)];
+        for (index, _) in before.iter().enumerate() {
+            executor.results.push_back(Ok(harmless.clone()));
+            expected_history.push(Message::Tool { call_id: id(format!("call-{index}"))?, result: Ok(harmless.clone()) });
+        }
+        let observed_id = id(format!("call-{}", before.len()))?;
+        executor.results.push_back(Ok(target.clone()));
+        executor.results.push_back(Ok(harmless.clone()));
+        expected_history.push(Message::Tool { call_id: observed_id.clone(), result: Ok(target.clone()) });
+        let report = run("s".into(), "t".into(), budget, &mut model, &mut executor);
+        if target.session_state() == SessionState::Unusable {
+            prop_assert_eq!(report.outcome, RunOutcome::TargetSessionUnusable { call_id: observed_id });
+            prop_assert_eq!(report.history, expected_history);
+            prop_assert_eq!(executor.calls.len(), before.len().saturating_add(1));
+            prop_assert_eq!(executor.results.len(), 1);
+            prop_assert_eq!(model.histories.len(), 1);
+        } else {
+            expected_history.push(Message::Tool { call_id: id(format!("call-{}", before.len().saturating_add(1)))?, result: Ok(harmless) });
+            if budget == 1 {
+                prop_assert_eq!(report.outcome, RunOutcome::ModelTurnLimit);
+            } else {
+                prop_assert_eq!(model.histories.last(), Some(&expected_history));
+                expected_history.push(Message::Assistant(submission("done".into())));
+                prop_assert_eq!(report.outcome, RunOutcome::Submitted { answer: "done".into() });
+            }
+            prop_assert_eq!(report.history, expected_history);
+            prop_assert_eq!(executor.calls.len(), values.len());
+        }
+    }
+
+    #[test]
+    fn validated_tool_ids_preserve_exact_nonempty_input(value in text()) {
+        let result = ToolCallId::try_from(value.clone());
+        if value.is_empty() {
+            prop_assert_eq!(result, Err(EmptyToolCallId));
+        } else {
+            let id = result?;
+            prop_assert_eq!(id.as_str(), value);
+        }
+    }
+
+    #[test]
     fn async_suspension_preserves_reports_effect_order_and_model_inputs(
         prompt in text(), task in text(), budget in 0u32..12,
         responses in prop::collection::vec(response(), 0..12),
-        results in prop::collection::vec(prop_oneof![command_result().prop_map(Ok), failure().prop_map(Err)], 0..24),
+        results in prop::collection::vec(prop_oneof![target_result().prop_map(Ok), client_failure().prop_map(Err)], 0..24),
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread().build()?;
         let mut sync_model = ScriptedModel { responses: responses.clone().into(), ..Default::default() };
@@ -154,9 +380,9 @@ struct UnwindingAdapter {
 }
 
 impl UnwindingAdapter {
-    fn invoke<T: Send>(
+    fn invoke<T: Send, E: Send>(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<T, DependencyError>> + Send {
+    ) -> impl std::future::Future<Output = Result<T, E>> + Send {
         self.invocations = self.invocations.saturating_add(1);
         if self.during_construction {
             std::panic::resume_unwind(Box::new("injected construction unwind"));
@@ -172,7 +398,7 @@ impl super::async_driver::ModelClient for UnwindingAdapter {
     fn respond(
         &mut self,
         _: &[Message],
-    ) -> impl std::future::Future<Output = Result<AssistantResponse, DependencyError>> + Send {
+    ) -> impl std::future::Future<Output = Result<AssistantResponse, ModelFailure>> + Send {
         self.invoke()
     }
 }
@@ -181,13 +407,14 @@ impl super::async_driver::CommandExecutor for UnwindingAdapter {
     fn execute(
         &mut self,
         _: &CommandCall,
-    ) -> impl std::future::Future<Output = Result<CommandResult, DependencyError>> + Send {
+    ) -> impl std::future::Future<Output = Result<ExecutionReport, CommandClientError>> + Send {
         self.invoke()
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn async_dependency_unwinds_stop_at_construction_or_after_suspension() {
+async fn async_dependency_unwinds_stop_at_construction_or_after_suspension()
+-> Result<(), Box<dyn std::error::Error>> {
     for during_construction in [true, false] {
         let mut model = UnwindingAdapter {
             during_construction,
@@ -198,10 +425,7 @@ async fn async_dependency_unwinds_stop_at_construction_or_after_suspension() {
             super::async_driver::run("s".into(), "t".into(), 10, &mut model, &mut executor).await;
         assert_eq!(
             report.outcome,
-            RunOutcome::DependencyFailure {
-                operation: Operation::Model,
-                error: DependencyError::Panicked
-            }
+            RunOutcome::ModelFailure(ModelFailure::panicked())
         );
         assert_eq!(model.invocations, 1);
         assert!(executor.calls.is_empty());
@@ -218,23 +442,22 @@ async fn async_dependency_unwinds_stop_at_construction_or_after_suspension() {
             super::async_driver::run("s".into(), "t".into(), 10, &mut model, &mut executor).await;
         assert_eq!(
             report.outcome,
-            RunOutcome::DependencyFailure {
-                operation: Operation::Command {
-                    call_id: "call-0".into()
-                },
-                error: DependencyError::Panicked
+            RunOutcome::CommandClientFailure {
+                call_id: id("call-0")?,
+                error: CommandClientError::panicked()
             }
         );
         assert_eq!(
             report.history.last(),
             Some(&Message::Tool {
-                call_id: "call-0".into(),
-                result: Err(DependencyError::Panicked)
+                call_id: id("call-0")?,
+                result: Err(CommandClientError::panicked())
             })
         );
         assert_eq!(executor.invocations, 1);
         assert_eq!(model.histories.len(), 1);
     }
+    Ok(())
 }
 
 fn model_step(step: Step) -> Result<super::model_loop::ModelTurn, TestCaseError> {
@@ -272,7 +495,7 @@ proptest! {
             let Step::Command(turn) = step else {
                 return Err(TestCaseError::fail("batch must finish before another model turn"));
             };
-            let id = format!("call-{index}");
+            let id = id(format!("call-{index}"))?;
             prop_assert_eq!(turn.call(), &CommandCall { id: id.clone(), command });
             expected.push(Message::Tool { call_id: id, result: Ok(result.clone()) });
             step = turn.complete(Ok(result));
@@ -343,7 +566,7 @@ proptest! {
             model.responses.push_back(Ok(response.clone()));
             for (index, (command, result)) in batch.iter().enumerate() {
                 executor.results.push_back(Ok(result.clone()));
-                expected_calls.push(CommandCall { id: format!("call-{index}"), command: command.clone() });
+                expected_calls.push(CommandCall { id: id(format!("call-{index}"))?, command: command.clone() });
             }
         }
         let report = run("system".into(), "task".into(), budget, &mut model, &mut executor);
@@ -361,7 +584,7 @@ proptest! {
     fn command_failure_records_uncertainty_and_stops_without_retry_or_later_effects(
         before in prop::collection::vec(text(), 0..8),
         after in prop::collection::vec(text(), 0..8),
-        failed_command in text(), error in failure(), result in command_result(),
+        failed_command in text(), error in client_failure(), result in command_result(),
     ) {
         let mut values = before.clone();
         values.push(failed_command.clone());
@@ -372,17 +595,17 @@ proptest! {
         let mut expected_calls = Vec::new();
         let mut expected_history = vec![Message::System("system".into()), Message::User("task".into()), Message::Assistant(response)];
         for (index, command) in before.iter().enumerate() {
-            let id = format!("call-{index}");
+            let id = id(format!("call-{index}"))?;
             executor.results.push_back(Ok(result.clone()));
             expected_calls.push(CommandCall { id: id.clone(), command: command.clone() });
             expected_history.push(Message::Tool { call_id: id, result: Ok(result.clone()) });
         }
-        let failed_id = format!("call-{}", before.len());
+        let failed_id = id(format!("call-{}", before.len()))?;
         executor.results.push_back(Err(error.clone()));
         expected_calls.push(CommandCall { id: failed_id.clone(), command: failed_command });
         expected_history.push(Message::Tool { call_id: failed_id.clone(), result: Err(error.clone()) });
         let report = run("system".into(), "task".into(), 10, &mut model, &mut executor);
-        prop_assert_eq!(report.outcome, RunOutcome::DependencyFailure { operation: Operation::Command { call_id: failed_id }, error });
+        prop_assert_eq!(report.outcome, RunOutcome::CommandClientFailure { call_id: failed_id, error });
         prop_assert_eq!(report.history, expected_history);
         prop_assert_eq!(executor.calls, expected_calls);
         prop_assert_eq!(model.histories.len(), 1);
@@ -390,16 +613,16 @@ proptest! {
 
     #[test]
     fn model_failure_preserves_completed_history_and_is_never_retried(
-        command in text(), result in command_result(), error in failure(),
+        command in text(), result in command_result(), error in model_failure(),
     ) {
         let response = commands(&[command]);
         let mut model = ScriptedModel { responses: VecDeque::from([Ok(response.clone()), Err(error.clone())]), ..Default::default() };
         let mut executor = ScriptedExecutor { results: VecDeque::from([Ok(result.clone())]), ..Default::default() };
         let report = run("system".into(), "task".into(), 10, &mut model, &mut executor);
-        prop_assert_eq!(report.outcome, RunOutcome::DependencyFailure { operation: Operation::Model, error });
+        prop_assert_eq!(report.outcome, RunOutcome::ModelFailure(error));
         prop_assert_eq!(model.histories.len(), 2);
         prop_assert_eq!(executor.calls.len(), 1);
-        prop_assert_eq!(report.history, vec![Message::System("system".into()), Message::User("task".into()), Message::Assistant(response), Message::Tool { call_id: "call-0".into(), result: Ok(result) }]);
+        prop_assert_eq!(report.history, vec![Message::System("system".into()), Message::User("task".into()), Message::Assistant(response), Message::Tool { call_id: id("call-0")?, result: Ok(result) }]);
     }
 
     #[test]
@@ -418,7 +641,7 @@ proptest! {
             expected_history.push(Message::Assistant(response));
             for (index, (_, result)) in batch.into_iter().enumerate() {
                 results.push_back(Ok(result.clone()));
-                expected_history.push(Message::Tool { call_id: format!("call-{index}"), result: Ok(result) });
+                expected_history.push(Message::Tool { call_id: id(format!("call-{index}"))?, result: Ok(result) });
             }
         }
         expected_inputs.push(expected_history.clone());

@@ -29,7 +29,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
     }
 
     let manifest = Manifest::from_path(&PathBuf::from(path)).map_err(|error| error.to_string())?;
-    let run_id = serde_json::to_string(&manifest.run_id)
+    let run_id = serde_json::to_string(manifest.run_id())
         .map_err(|error| format!("could not serialize run_id: {error}"))?;
     writeln!(
         io::stdout().lock(),

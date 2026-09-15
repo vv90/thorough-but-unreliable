@@ -155,14 +155,29 @@ command executor until the experiment command HTTP client is implemented.
 The core validates each complete assistant response before executing commands.
 Call IDs must be nonempty and unique within that response. Commands execute in
 order; each result is appended with its call ID before another model request.
-Nonzero exits, signals, and command timeouts are results the model can observe.
-Dependency errors terminate immediately without retries, preserving uncertainty
-and the completed transcript. One submission finishes with its answer; multiple
+Raw assistant responses retain their original IDs for diagnosis, while dispatched
+commands and recorded tool results use a validated `ToolCallId`. Broker request
+numbers use the separate `CommandSequence` type; the command client owns sequence
+assignment and response correlation.
+
+The transcript retains complete target `ExecutionReport` values, including raw
+bytes, truncation, completion provenance, and session usability. The loop stops
+immediately on any unusable session, even after exit code zero, retaining the
+report and dispatching no further effects. Recoverable input rejection is
+recorded for the model; remaining commands can proceed while the session is ready.
+Confirmed deadline termination permits continuation only if the session is ready.
+
+Model failures and command-client failures have distinct typed categories and
+optional diagnostics. Failure to obtain a valid broker report is distinct from a
+report describing failed target execution. These failures terminate immediately
+without retries, preserving uncertainty and the completed transcript.
+One submission finishes with its answer; multiple
 submissions or a mixture of submission and commands are protocol errors. A
 response with no tool calls ends as early termination.
 
-The turn budget bounds model calls. Zero permits no calls; all commands in the
-last allowed response finish before the budget prevents another model request.
+The turn budget bounds model calls. Zero permits no calls; commands in the last
+allowed response finish while the target remains usable, before the budget
+prevents another model request.
 A submission or failure on that last turn keeps its specific outcome.
 Run-wide wall-clock/output limits, event export,
 and a `harness run` CLI are future increments. The existing VM smoke test still
@@ -207,8 +222,13 @@ redirects, retries, and environment proxies, and retains TLS verification.
 
 Requests contain the conversation, both tool definitions, `stream: false`, and
 `n: 1`. Tool arguments and command results are JSON encoded inside their string
-fields; command results preserve stdout, stderr, and completion status. A
-history containing a dependency failure cannot be resumed. The serialized
+fields. `presentation.rs` provides a pure model-facing projection of target
+reports: UTF-8 output is text, other bytes are losslessly hex-encoded, and both
+carry explicit encoding/truncation metadata. Sequence, completion provenance,
+failure category, and session state are included. The original report stays in
+the transcript. This projection is not the future broker wire format.
+A history containing a command-client failure or unusable target report cannot
+be encoded for another model turn. The serialized
 request is checked against its size limit before sending. Response bytes are
 bounded while reading, including chunked responses; the total HTTP timeout
 covers response body reads too. These bounds do not replace run-wide limits.
@@ -220,6 +240,8 @@ Unknown tools, malformed JSON, and token-truncated responses return errors.
 Submission/command combinations remain a decision for the pure loop. Transport
 errors preserve the possibility that inference already completed; no request
 is retried automatically.
+Conversion to `ModelFailure` retains typed HTTP status, invalid response,
+token-limit, size-limit, configuration, and other categories with diagnostics.
 
 The same Cargo commands above run property tests for wire conversion and size
 limits, plus local fake-server tests for request content, parsing, redirects,
@@ -271,6 +293,15 @@ This increment defines the trait, data types, and adapter obligations. Concrete
 adapters and enforcement are still pending. The types have no wire encoding yet.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 the future broker will translate between HTTP and `TargetSession`.
+
+## Manifest validation
+
+`Manifest` has private fields and read-only `version()`/`run_id()` accessors.
+`from_slice` performs pure object/schema/semantic validation; file and reader
+methods provide the IO boundary. Direct Serde deserialization goes through the
+same validation, so it cannot bypass the version or nonempty run-ID checks.
+Nonobjects, duplicate fields, unknown fields, and trailing JSON are rejected.
+Reader failures, including unwinding reader dependencies, return explicit errors.
 
 ## Development container
 

@@ -4,9 +4,10 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use super::types::{
-    AssistantResponse, CommandCall, CommandResult, DependencyError, Message, Operation,
-    ProtocolError, RunOutcome, RunReport, Tool,
+    AssistantResponse, CommandCall, CommandClientError, Message, ModelFailure, ProtocolError,
+    RunOutcome, RunReport, Tool, ToolCallId,
 };
+use crate::target::{ExecutionReport, SessionState};
 
 #[derive(Debug)]
 pub enum Step {
@@ -69,17 +70,14 @@ impl ModelTurn {
         &self.context.history
     }
 
-    pub fn complete(self, result: Result<AssistantResponse, DependencyError>) -> Step {
+    pub fn complete(self, result: Result<AssistantResponse, ModelFailure>) -> Step {
         let mut context = self.context;
         // ModelTurn is constructed only with a positive remaining budget.
         context.turns_remaining = context.turns_remaining.saturating_sub(1);
         let response = match result {
             Ok(response) => response,
             Err(error) => {
-                return context.finish(RunOutcome::DependencyFailure {
-                    operation: Operation::Model,
-                    error,
-                });
+                return context.finish(RunOutcome::ModelFailure(error));
             }
         };
 
@@ -107,20 +105,26 @@ impl CommandTurn {
         &self.call
     }
 
-    pub fn complete(self, result: Result<CommandResult, DependencyError>) -> Step {
+    pub fn complete(self, result: Result<ExecutionReport, CommandClientError>) -> Step {
         let mut context = self.context;
-        let failure = result.as_ref().err().cloned();
+        let terminal = match &result {
+            Err(error) => Some(RunOutcome::CommandClientFailure {
+                call_id: self.call.id.clone(),
+                error: error.clone(),
+            }),
+            Ok(report) if report.session_state() == SessionState::Unusable => {
+                Some(RunOutcome::TargetSessionUnusable {
+                    call_id: self.call.id.clone(),
+                })
+            }
+            Ok(_) => None,
+        };
         context.history.push(Message::Tool {
             call_id: self.call.id.clone(),
             result,
         });
-        match failure {
-            Some(error) => context.finish(RunOutcome::DependencyFailure {
-                operation: Operation::Command {
-                    call_id: self.call.id,
-                },
-                error,
-            }),
+        match terminal {
+            Some(outcome) => context.finish(outcome),
             None => context.next_command(self.pending),
         }
     }
@@ -139,15 +143,13 @@ fn classify(response: &AssistantResponse) -> Result<Decision, ProtocolError> {
     let mut answer = None;
     let mut commands = VecDeque::new();
     for call in &response.tool_calls {
-        if call.id.is_empty() {
-            return Err(ProtocolError::EmptyCallId);
-        }
+        let id = ToolCallId::try_from(call.id.clone()).map_err(|_| ProtocolError::EmptyCallId)?;
         if !ids.insert(&call.id) {
             return Err(ProtocolError::DuplicateCallId(call.id.clone()));
         }
         match &call.tool {
             Tool::ExecuteTargetCommand { command } => commands.push_back(CommandCall {
-                id: call.id.clone(),
+                id,
                 command: command.clone(),
             }),
             Tool::Submit { answer: submitted } => {

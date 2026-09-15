@@ -40,6 +40,19 @@ fn error() -> impl Strategy<Value = ExecutionError> {
 
 proptest! {
     #[test]
+    fn command_sequences_preserve_values_and_increment_without_wrapping(value in any::<u64>()) {
+        let sequence = CommandSequence::new(value);
+        prop_assert_eq!(sequence.get(), value);
+        if let Some(next) = sequence.checked_next() {
+            prop_assert!(next.get() > value);
+            prop_assert_eq!(next.get().checked_sub(value), Some(1));
+        } else {
+            prop_assert_eq!(value, u64::MAX);
+        }
+        prop_assert_eq!(CommandSequence::new(u64::MAX).checked_next(), None);
+    }
+
+    #[test]
     fn uncertain_execution_is_unusable_regardless_of_output_or_error(
         sequence in any::<u64>(), output in output(), error in error(),
     ) {
@@ -50,7 +63,7 @@ proptest! {
                 execution_state: ExecutionState::MayStillBeRunning,
             },
         ] {
-            let report = ExecutionReport { sequence, outcome };
+            let report = ExecutionReport { sequence: CommandSequence::new(sequence), outcome };
             prop_assert_eq!(report.session_state(), SessionState::Unusable);
         }
     }

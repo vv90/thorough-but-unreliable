@@ -9,24 +9,38 @@ use std::{collections::TryReserveError, fmt};
 
 use crate::harness::{
     async_driver,
-    types::{AssistantResponse, DependencyError, Message},
+    types::{AssistantResponse, Message, ModelFailure, ModelFailureKind},
 };
 
 impl async_driver::ModelClient for InferenceClient {
-    async fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, DependencyError> {
-        self.complete(history).await.map_err(DependencyError::from)
+    async fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, ModelFailure> {
+        self.complete(history).await.map_err(ModelFailure::from)
     }
 }
 
-impl From<InferenceError> for DependencyError {
+impl From<InferenceError> for ModelFailure {
     fn from(error: InferenceError) -> Self {
-        match error {
-            InferenceError::DependencyPanicked => Self::Panicked,
-            InferenceError::Transport(_) => Self::CompletionUnknown(error.to_string()),
-            // An HTTP/decoding failure is an observed failure to obtain a usable
-            // response, not a claim that the server performed no computation.
-            _ => Self::Failed(error.to_string()),
-        }
+        let diagnostic = Some(error.to_string());
+        let kind = match error {
+            InferenceError::Configuration(_) => ModelFailureKind::Configuration,
+            InferenceError::InvalidHistory(_) => ModelFailureKind::InvalidHistory,
+            InferenceError::Json(_) => ModelFailureKind::Json,
+            InferenceError::InvalidResponse(_) => ModelFailureKind::InvalidResponse,
+            InferenceError::UnsupportedTool(name) => ModelFailureKind::UnsupportedTool(name),
+            InferenceError::TruncatedResponse => ModelFailureKind::TokenLimit,
+            InferenceError::ClientBuild(_) => ModelFailureKind::ClientBuild,
+            InferenceError::Transport(_) => ModelFailureKind::Transport,
+            InferenceError::HttpStatus(status) => ModelFailureKind::HttpStatus(status),
+            InferenceError::RequestTooLarge { limit } => {
+                ModelFailureKind::RequestTooLarge { limit }
+            }
+            InferenceError::ResponseTooLarge { limit } => {
+                ModelFailureKind::ResponseTooLarge { limit }
+            }
+            InferenceError::Allocation(_) => ModelFailureKind::Allocation,
+            InferenceError::DependencyPanicked => ModelFailureKind::Panicked,
+        };
+        Self { kind, diagnostic }
     }
 }
 
