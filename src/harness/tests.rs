@@ -93,6 +93,150 @@ impl CommandExecutor for ScriptedExecutor {
     }
 }
 
+impl super::async_driver::ModelClient for ScriptedModel {
+    async fn respond(&mut self, history: &[Message]) -> Result<AssistantResponse, DependencyError> {
+        tokio::task::yield_now().await;
+        ModelClient::respond(self, history)
+    }
+}
+
+impl super::async_driver::CommandExecutor for ScriptedExecutor {
+    async fn execute(&mut self, call: &CommandCall) -> Result<CommandResult, DependencyError> {
+        tokio::task::yield_now().await;
+        CommandExecutor::execute(self, call)
+    }
+}
+
+fn response() -> impl Strategy<Value = Result<AssistantResponse, DependencyError>> {
+    prop_oneof![
+        prop::collection::vec(text(), 1..5).prop_map(|values| Ok(commands(&values))),
+        text().prop_map(|answer| Ok(submission(answer))),
+        text().prop_map(|text| Ok(AssistantResponse {
+            text: Some(text),
+            tool_calls: vec![]
+        })),
+        text().prop_map(|answer| {
+            let mut response = commands(&["command".into()]);
+            response.tool_calls.extend(submission(answer).tool_calls);
+            Ok(response)
+        }),
+        failure().prop_map(Err),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn async_suspension_preserves_reports_effect_order_and_model_inputs(
+        prompt in text(), task in text(), budget in 0u32..12,
+        responses in prop::collection::vec(response(), 0..12),
+        results in prop::collection::vec(prop_oneof![command_result().prop_map(Ok), failure().prop_map(Err)], 0..24),
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        let mut sync_model = ScriptedModel { responses: responses.clone().into(), ..Default::default() };
+        let mut async_model = ScriptedModel { responses: responses.into(), ..Default::default() };
+        let mut sync_executor = ScriptedExecutor { results: results.clone().into(), ..Default::default() };
+        let mut async_executor = ScriptedExecutor { results: results.into(), ..Default::default() };
+        let expected = run(prompt.clone(), task.clone(), budget, &mut sync_model, &mut sync_executor);
+        let actual = runtime.block_on(super::async_driver::run(prompt, task, budget, &mut async_model, &mut async_executor));
+        prop_assert_eq!(actual, expected);
+        prop_assert_eq!(async_model.histories, sync_model.histories);
+        prop_assert_eq!(async_executor.calls, sync_executor.calls);
+        prop_assert_eq!(async_model.responses, sync_model.responses);
+        prop_assert_eq!(async_executor.results, sync_executor.results);
+    }
+}
+
+// Deliberately inject foreign unwinds to test the boundary; production adapters
+// must return errors. resume_unwind avoids changing the process panic hook.
+struct UnwindingAdapter {
+    during_construction: bool,
+    invocations: usize,
+}
+
+impl UnwindingAdapter {
+    fn invoke<T: Send>(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<T, DependencyError>> + Send {
+        self.invocations = self.invocations.saturating_add(1);
+        if self.during_construction {
+            std::panic::resume_unwind(Box::new("injected construction unwind"));
+        }
+        async {
+            tokio::task::yield_now().await;
+            std::panic::resume_unwind(Box::new("injected polling unwind"))
+        }
+    }
+}
+
+impl super::async_driver::ModelClient for UnwindingAdapter {
+    fn respond(
+        &mut self,
+        _: &[Message],
+    ) -> impl std::future::Future<Output = Result<AssistantResponse, DependencyError>> + Send {
+        self.invoke()
+    }
+}
+
+impl super::async_driver::CommandExecutor for UnwindingAdapter {
+    fn execute(
+        &mut self,
+        _: &CommandCall,
+    ) -> impl std::future::Future<Output = Result<CommandResult, DependencyError>> + Send {
+        self.invoke()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_dependency_unwinds_stop_at_construction_or_after_suspension() {
+    for during_construction in [true, false] {
+        let mut model = UnwindingAdapter {
+            during_construction,
+            invocations: 0,
+        };
+        let mut executor = ScriptedExecutor::default();
+        let report =
+            super::async_driver::run("s".into(), "t".into(), 10, &mut model, &mut executor).await;
+        assert_eq!(
+            report.outcome,
+            RunOutcome::DependencyFailure {
+                operation: Operation::Model,
+                error: DependencyError::Panicked
+            }
+        );
+        assert_eq!(model.invocations, 1);
+        assert!(executor.calls.is_empty());
+
+        let mut model = ScriptedModel {
+            responses: VecDeque::from([Ok(commands(&["first".into(), "later".into()]))]),
+            ..Default::default()
+        };
+        let mut executor = UnwindingAdapter {
+            during_construction,
+            invocations: 0,
+        };
+        let report =
+            super::async_driver::run("s".into(), "t".into(), 10, &mut model, &mut executor).await;
+        assert_eq!(
+            report.outcome,
+            RunOutcome::DependencyFailure {
+                operation: Operation::Command {
+                    call_id: "call-0".into()
+                },
+                error: DependencyError::Panicked
+            }
+        );
+        assert_eq!(
+            report.history.last(),
+            Some(&Message::Tool {
+                call_id: "call-0".into(),
+                result: Err(DependencyError::Panicked)
+            })
+        );
+        assert_eq!(executor.invocations, 1);
+        assert_eq!(model.histories.len(), 1);
+    }
+}
+
 fn model_step(step: Step) -> Result<super::model_loop::ModelTurn, TestCaseError> {
     match step {
         Step::Model(turn) => Ok(turn),

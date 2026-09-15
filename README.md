@@ -146,6 +146,11 @@ step, or finished report. Each step is consumed when its result is supplied.
 `src/harness/types.rs` defines the internal messages and outcomes.
 `src/harness/driver.rs` is a thin synchronous driver over `ModelClient` and
 `CommandExecutor`; tests supply in-memory scripted implementations.
+`src/harness/async_driver.rs` provides corresponding asynchronous interfaces and
+`run(system_prompt, task, max_model_turns, &mut model, &mut executor).await`.
+It awaits one effect at a time and feeds its result into the pure core.
+`InferenceClient` implements its model interface; tests supply an in-memory
+command executor until the experiment command HTTP client is implemented.
 
 The core validates each complete assistant response before executing commands.
 Call IDs must be nonempty and unique within that response. Commands execute in
@@ -158,14 +163,18 @@ response with no tool calls ends as early termination.
 
 The turn budget bounds model calls. Zero permits no calls; all commands in the
 last allowed response finish before the budget prevents another model request.
-A submission or failure on that last turn keeps its specific outcome. HTTP,
-wall-clock/body/output limits, event export, and a `harness run` CLI are future
-increments. The existing VM smoke test still exercises manifest loading.
+A submission or failure on that last turn keeps its specific outcome.
+Run-wide wall-clock/output limits, event export,
+and a `harness run` CLI are future increments. The existing VM smoke test still
+exercises manifest loading.
 
 Dependency calls catch unwinding panics as explicit failures and stop. Discard
 the adapters after such a failure. Process aborts cannot be caught; the driver
 does not change the global panic hook. A caught panic payload is deliberately
 retained because its destructor could panic too.
+The async boundary covers both future construction and polling. Dropping the
+run future cancels driving without producing a report; an already dispatched
+effect may still complete remotely, so cancellation is not safe to retry blindly.
 
 Run the core's property-based tests and lint checks in the pinned dev shell:
 
@@ -181,6 +190,53 @@ effects, the model-turn budget, and stopping without retries on dependency
 failures. Generated inputs include Unicode text, command completion statuses,
 and failures with uncertain completion. Proptest is a development dependency;
 test assertion failures are reported by the test framework.
+
+### Inference HTTP client
+
+`src/harness/inference/wire.rs` contains pure request encoding and response
+validation. `http.rs` provides `InferenceClient::new(config)` and asynchronous
+`complete(&history)`, for use inside a Tokio runtime with IO and time enabled.
+The async driver connects this client to the state machine without an extra
+runtime or background task; the caller supplies the Tokio runtime.
+
+`InferenceConfig` supplies the full `/v1/chat/completions` HTTP(S) URL, model,
+`max_tokens`, connection timeout, total HTTP timeout, and maximum request and
+response sizes in bytes. Limits must be positive. URL credentials, query
+strings, and fragments are rejected. The client uses HTTP/1.1, disables
+redirects, retries, and environment proxies, and retains TLS verification.
+
+Requests contain the conversation, both tool definitions, `stream: false`, and
+`n: 1`. Tool arguments and command results are JSON encoded inside their string
+fields; command results preserve stdout, stderr, and completion status. A
+history containing a dependency failure cannot be resumed. The serialized
+request is checked against its size limit before sending. Response bytes are
+bounded while reading, including chunked responses; the total HTTP timeout
+covers response body reads too. These bounds do not replace run-wide limits.
+
+Responses must contain one assistant choice at index zero, with a supported
+finish reason and well-formed function calls. Tool argument objects require
+exactly `command` or `answer`; IDs must be nonempty and unique per response.
+Unknown tools, malformed JSON, and token-truncated responses return errors.
+Submission/command combinations remain a decision for the pure loop. Transport
+errors preserve the possibility that inference already completed; no request
+is retried automatically.
+
+The same Cargo commands above run property tests for wire conversion and size
+limits, plus local fake-server tests for request content, parsing, redirects,
+disconnects, status errors, body limits, and timeouts. No real Ollama service or
+VM is needed for these tests. Real Ollama interoperability remains untested.
+Integration tests drive a command batch through the fake inference server and
+in-memory executor, verify the next HTTP request contains the ordered results,
+and finish on submission. They also cover failure handling, protocol rejection,
+and the final allowed command batch. A property test compares async execution
+with the synchronous driver across generated scripts, including suspension,
+failures, invalid responses, and turn budgets. Both reports and effect traces
+must match. Injected dependency unwinds verify that the async driver stops
+during future construction or after suspension.
+
+Protocol and transport references:
+[Ollama compatibility](https://docs.ollama.com/api/openai-compatibility),
+[Reqwest client configuration](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html).
 
 ## Development container
 

@@ -1,6 +1,8 @@
-//! Deterministic conversation loop. Only `driver` invokes effectful dependencies.
+//! Deterministic conversation loop and separate effectful adapters.
 
+pub mod async_driver;
 pub mod driver;
+pub mod inference;
 pub mod model_loop;
 pub mod types;
 

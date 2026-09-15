@@ -1,4 +1,4 @@
-//! Thin synchronous effect layer. HTTP adapters and async driving are deferred.
+//! Thin synchronous effect layer for in-memory adapters and deterministic tests.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
