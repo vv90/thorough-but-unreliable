@@ -246,12 +246,19 @@ execution identity, shell, initial directory, environment, and limits. Each
 `execute` request contains only a sequence number and command text. The broker
 owns authentication and duplicate/out-of-order request rejection.
 
-An `ExecutionReport` retains bounded raw stdout/stderr with truncation flags,
-including partial output on failure. Completion distinguishes parent-observed
-and guest-reported exit/signal status, deadline expiry with confirmed or uncertain
-termination, definite failure to start, and unknown completion. Typed errors
-carry optional diagnostics. A report also declares whether the session permits
-another command; this is not an assertion that the target is uncompromised.
+An `ExecutionReport` contains a sequence and an `ExecutionOutcome`. Only outcomes
+where execution may have started carry raw stdout/stderr with truncation flags;
+`NotStarted` cannot contain command output. Completed executions distinguish
+parent-observed and guest-reported exit/signal status. Exit codes use `u8`, and
+signals use `NonZeroU32` with additional platform validation at the adapter boundary.
+
+Session usability is derived from the outcome. `Unknown` and a deadline with
+`MayStillBeRunning` cannot carry a readiness override and always require discarding
+the session. Known completion or confirmed deadline termination can retain an
+adapter's readiness decision. Input rejection has its own error type and preserves
+a healthy session; session failures are terminal. Diagnostics remain separate
+from command output. These types prevent contradictory reports; adapters still
+must establish the reported facts and enforce their own lifecycle.
 
 Adapters must launch fresh shells with EOF on stdin, preserve target filesystem
 state, apply the configured output/deadline/descendant policy, and never retry

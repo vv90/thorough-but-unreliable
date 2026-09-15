@@ -1,5 +1,9 @@
 # Implementation guidelines
 
+- Use the type system to make impossible states unrepresentable. Prefer enums
+  with variant-specific data over independent fields that permit contradictions.
+  Use validated types for constrained values and derive redundant state instead
+  of storing it separately. Validate external data when constructing these types.
 - Use property-based tests where they fit. Test semantic invariants that hold
   across all valid states, or across an explicitly defined set of states with
   stated preconditions. Prefer these properties over tests that merely repeat

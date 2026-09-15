@@ -20,6 +20,8 @@ Follow `AGENTS.md` and `IMPLEMENTATION.md`:
 
 - Work in small increments and discuss each next increment before applying it.
 - Keep the state-transition logic pure and effects behind thin boundaries.
+- Make impossible states unrepresentable using enums, validated types, and
+  derived state rather than redundant independent fields.
 - Use property-based tests for semantic invariants where they fit.
 - Return explicit errors. Production code must not use panic, `unwrap`,
   `expect`, unchecked indexing, or similar escape hatches.
@@ -179,8 +181,13 @@ a usable response, without implying the server did no computation).
 `src/target/mod.rs` defines the experiment-side `TargetSession` async trait and
 internal request/report types. Sessions bind one prepared target and its trusted
 execution policy. Requests carry only a broker-assigned sequence and command.
-Reports preserve raw partial output/truncation, completion source (parent or
-guest), deadline termination uncertainty, typed failures, and session usability.
+Reports contain an `ExecutionOutcome`: only possibly-started outcomes have raw
+partial output/truncation. Completed executions carry parent/guest provenance and
+`u8` exit codes or positive `NonZeroU32` signals (with platform validation left to
+adapters). Session usability is derived: unknown completion and uncertain deadlines
+cannot declare readiness. Known completion/confirmed termination may still leave
+a session unusable. Command rejection and session failure have separate types;
+`NotStarted` cannot carry command output.
 
 The contract requires serial execution without retries, fresh shells, EOF stdin,
 bounded output and time, and explicit descendant policy. Uncertain completion or
@@ -189,14 +196,14 @@ Cancellation requires discarding the session and notifying supervision. An
 uncertain deadline ends the trial through external supervision. Target lifecycle
 and broker authentication/sequencing remain separate responsibilities.
 
-Only the interface and data types are implemented, with a compiling adapter
-example. Concrete adapters and enforcement, setup types, and wire encoding remain
+The interface, data types, and pure readiness derivation are implemented. A
+compiling adapter example and compile-fail examples exercise the public API.
+Concrete adapters and lifecycle enforcement, setup types, and wire encoding remain
 pending. The existing harness-side `CommandExecutor` is a separate interface.
 
 ## Tests and validation
 
-The suite currently has 32 unit/property/integration tests plus an interface
-doctest. It includes property-based tests for:
+The suite includes property-based tests for:
 
 - command ordering and result/call-ID correlation;
 - complete transcript preservation and deterministic replay;
@@ -208,6 +215,12 @@ doctest. It includes property-based tests for:
 - rejection of malformed tool argument objects and unknown tools; and
 - exact response-buffer limits, including leaving a buffer unchanged after a
   rejected append.
+
+Target properties cover mandatory session discard after uncertain execution,
+separation of reusable input rejection from terminal session failures, and
+preservation of the adapter's readiness decision after known completion.
+Compile-fail doctests reject readiness overrides on uncertain outcomes and
+command output on a report whose command never started.
 
 An additional generated-script property compares async and synchronous reports,
 model inputs, ordered command calls, and unconsumed scripts across suspension,

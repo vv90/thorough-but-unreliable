@@ -6,7 +6,7 @@
 //! Target creation, reset, and destruction belong to external supervision.
 //! The broker owns authentication and sequence validation; adapters own execution.
 
-use std::{fmt, future::Future};
+use std::{fmt, future::Future, num::NonZeroU32};
 
 /// A session bound to one prepared target and its trusted execution policy.
 ///
@@ -27,7 +27,7 @@ use std::{fmt, future::Future};
 ///   Readiness must account for the configured descendant policy.
 /// - Lost replies, malformed protocol records, and uncertain deadlines make the
 ///   session unusable. Once unusable, it stays unusable: subsequent calls return
-///   `NotStarted` with `SessionUnusable`, without dispatching any command.
+///   `NotStarted(SessionUnusable)`, without dispatching any command.
 /// - Return typed errors rather than panicking. Contain dependency unwinds where
 ///   supported and report their execution uncertainty; process aborts cannot be
 ///   caught. Discard the session after a dependency panic.
@@ -55,15 +55,7 @@ use std::{fmt, future::Future};
 ///     async fn execute(&mut self, request: CommandRequest) -> ExecutionReport {
 ///         ExecutionReport {
 ///             sequence: request.sequence,
-///             stdout: CapturedOutput::default(),
-///             stderr: CapturedOutput::default(),
-///             completion: Completion::NotStarted {
-///                 error: ExecutionError {
-///                     kind: ExecutionErrorKind::SessionUnusable,
-///                     diagnostic: Some("target is no longer available".into()),
-///                 },
-///             },
-///             session_state: SessionState::Unusable,
+///             outcome: ExecutionOutcome::NotStarted(StartFailure::SessionUnusable),
 ///         }
 ///     }
 /// }
@@ -95,12 +87,88 @@ pub struct CommandRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionReport {
     pub sequence: u64,
+    pub outcome: ExecutionOutcome,
+}
+
+impl ExecutionReport {
+    pub fn session_state(&self) -> SessionState {
+        self.outcome.session_state()
+    }
+}
+
+/// Output exists only for outcomes where a command may have started.
+/// Session usability is derived; uncertain outcomes cannot declare themselves ready.
+///
+/// An uncertain completion cannot carry a readiness override:
+/// ```compile_fail
+/// use thorough_but_unreliable::target::*;
+/// let outcome = ExecutionOutcome::Unknown {
+///     output: CommandOutput::default(),
+///     error: ExecutionError {
+///         kind: ExecutionErrorKind::Transport,
+///         diagnostic: None,
+///     },
+///     session_state: SessionState::Ready,
+/// };
+/// ```
+/// A command that never started cannot carry captured command output:
+/// ```compile_fail
+/// use thorough_but_unreliable::target::*;
+/// let report = ExecutionReport {
+///     sequence: 1,
+///     outcome: ExecutionOutcome::NotStarted(StartFailure::SessionUnusable),
+///     stdout: CapturedOutput::default(),
+/// };
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExecutionOutcome {
+    Completed {
+        output: CommandOutput,
+        completion: ProcessCompletion,
+        /// A known completion can still leave the session unusable, e.g. when
+        /// descendant cleanup or channel health prevents another command.
+        session_state: SessionState,
+    },
+    /// The adapter can establish execution never began. Diagnostics belong to
+    /// the error, not command stdout/stderr.
+    NotStarted(StartFailure),
+    /// The adapter's deadline expired, independently of guest-reported status.
+    DeadlineExceeded {
+        output: CommandOutput,
+        execution_state: ExecutionState,
+    },
+    /// Execution may have begun; its outcome cannot be established.
+    Unknown {
+        output: CommandOutput,
+        error: ExecutionError,
+    },
+}
+
+impl ExecutionOutcome {
+    /// These types enforce report consistency, not external facts or the
+    /// adapter's internal lifecycle. Adapters must still establish observations
+    /// and retain unusability after a terminal failure.
+    pub fn session_state(&self) -> SessionState {
+        match self {
+            Self::Completed { session_state, .. }
+            | Self::DeadlineExceeded {
+                execution_state: ExecutionState::ConfirmedStopped { session_state },
+                ..
+            } => *session_state,
+            Self::NotStarted(failure) => failure.session_state(),
+            Self::Unknown { .. }
+            | Self::DeadlineExceeded {
+                execution_state: ExecutionState::MayStillBeRunning,
+                ..
+            } => SessionState::Unusable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandOutput {
     pub stdout: CapturedOutput,
     pub stderr: CapturedOutput,
-    pub completion: Completion,
-    /// Adapters must report `Unusable` after uncertain completion or a protocol
-    /// failure and retain that state internally. This field does not enforce it.
-    pub session_state: SessionState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -113,26 +181,17 @@ pub struct CapturedOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Completion {
+pub enum ProcessCompletion {
     Exited {
-        code: i32,
+        /// Exit status of the target's POSIX shell/process.
+        code: u8,
         source: CompletionSource,
     },
     Signaled {
-        signal: i32,
+        /// Positive signal number; the adapter additionally validates numbers
+        /// against its target platform when decoding external data.
+        signal: NonZeroU32,
         source: CompletionSource,
-    },
-    /// The adapter's deadline expired, independently of guest-reported status.
-    DeadlineExceeded {
-        execution_state: ExecutionState,
-    },
-    /// The adapter can establish that this command did not begin execution.
-    NotStarted {
-        error: ExecutionError,
-    },
-    /// Execution may have begun; its outcome cannot be established.
-    Unknown {
-        error: ExecutionError,
     },
 }
 
@@ -149,7 +208,10 @@ pub enum CompletionSource {
 pub enum ExecutionState {
     /// External supervision confirmed execution stopped, including descendants
     /// covered by the policy. A guest acknowledgment alone is insufficient.
-    ConfirmedStopped,
+    ConfirmedStopped {
+        /// Confirmed termination does not necessarily leave a usable target.
+        session_state: SessionState,
+    },
     /// Execution, including descendants, may continue beyond the deadline.
     MayStillBeRunning,
 }
@@ -164,6 +226,40 @@ pub enum SessionState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartFailure {
+    /// Invalid input rejected without dispatch or damage to a healthy session.
+    /// An already unusable session must return `SessionUnusable` instead.
+    Rejected(CommandRejection),
+    SessionUnusable,
+    /// A failure known to precede execution. The session must be discarded.
+    /// Use `ExecutionOutcome::Unknown` whenever non-execution is uncertain.
+    Failed(ExecutionError),
+}
+
+impl StartFailure {
+    pub fn session_state(&self) -> SessionState {
+        match self {
+            Self::Rejected(_) => SessionState::Ready,
+            Self::SessionUnusable | Self::Failed(_) => SessionState::Unusable,
+        }
+    }
+}
+
+/// Rejections cannot describe dispatch, transport, or dependency-panic failures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandRejection {
+    pub kind: RejectionKind,
+    /// Bounded explanation without credentials or parent secrets.
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectionKind {
+    InvalidCommand,
+    CommandTooLarge,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionError {
     pub kind: ExecutionErrorKind,
     /// Optional explanation, never a machine-readable control instruction.
@@ -174,12 +270,10 @@ pub struct ExecutionError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionErrorKind {
     TargetUnavailable,
-    InvalidCommand,
     Transport,
     MalformedResponse,
     ExecutionMechanism,
     ResourceExhausted,
-    SessionUnusable,
     DependencyPanicked,
 }
 
@@ -194,3 +288,6 @@ impl fmt::Display for ExecutionError {
 }
 
 impl std::error::Error for ExecutionError {}
+
+#[cfg(test)]
+mod tests;
