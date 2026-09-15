@@ -65,6 +65,7 @@ use a physical machine without changing the harness command interface.
 └── src
     ├── lib.rs
     ├── manifest.rs
+    ├── target/mod.rs
     ├── bin/harness.rs
     └── harness
         ├── types.rs
@@ -173,9 +174,29 @@ untested. Transport errors map to completion-unknown loop failures, caught
 panics to `Panicked`, and other inference errors to `Failed` (failure to obtain
 a usable response, without implying the server did no computation).
 
+### Target execution interface
+
+`src/target/mod.rs` defines the experiment-side `TargetSession` async trait and
+internal request/report types. Sessions bind one prepared target and its trusted
+execution policy. Requests carry only a broker-assigned sequence and command.
+Reports preserve raw partial output/truncation, completion source (parent or
+guest), deadline termination uncertainty, typed failures, and session usability.
+
+The contract requires serial execution without retries, fresh shells, EOF stdin,
+bounded output and time, and explicit descendant policy. Uncertain completion or
+protocol failure makes a session unusable; adapters must reject further requests.
+Cancellation requires discarding the session and notifying supervision. An
+uncertain deadline ends the trial through external supervision. Target lifecycle
+and broker authentication/sequencing remain separate responsibilities.
+
+Only the interface and data types are implemented, with a compiling adapter
+example. Concrete adapters and enforcement, setup types, and wire encoding remain
+pending. The existing harness-side `CommandExecutor` is a separate interface.
+
 ## Tests and validation
 
-The suite currently has 32 passing tests. It includes property-based tests for:
+The suite currently has 32 unit/property/integration tests plus an interface
+doctest. It includes property-based tests for:
 
 - command ordering and result/call-ID correlation;
 - complete transcript preservation and deterministic replay;
@@ -232,7 +253,7 @@ test.
 - `harness run`, expanded run manifest, system prompt/task loading, and a
   systemd evaluation service.
 - Run-wide time/message/output limits and structured event export.
-- Experiment broker, target adapter, experiment image, and evidence fixture.
+- Experiment broker, concrete target adapters, experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
 - First end-to-end isolation trial.
@@ -244,7 +265,9 @@ test.
 Define the narrow experiment command protocol and add its bounded HTTP client,
 implementing the async driver's `CommandExecutor`. Discuss the protocol before
 implementing it: authentication, request sequencing, timeout, output limits,
-and uncertain completion. Test against a fake broker with no automatic retries.
+and uncertain completion. Preserve the distinctions in the new `TargetSession`
+contract, including guest-reported completion and session usability. Test against
+a fake broker with no automatic retries.
 
 ### Subsequent increments
 

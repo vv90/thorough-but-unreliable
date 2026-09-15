@@ -238,6 +238,33 @@ Protocol and transport references:
 [Ollama compatibility](https://docs.ollama.com/api/openai-compatibility),
 [Reqwest client configuration](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html).
 
+## Target execution interface
+
+`src/target/mod.rs` defines `TargetSession`, the experiment broker's interface
+to a prepared container, VM, or other target. Trusted setup binds the target,
+execution identity, shell, initial directory, environment, and limits. Each
+`execute` request contains only a sequence number and command text. The broker
+owns authentication and duplicate/out-of-order request rejection.
+
+An `ExecutionReport` retains bounded raw stdout/stderr with truncation flags,
+including partial output on failure. Completion distinguishes parent-observed
+and guest-reported exit/signal status, deadline expiry with confirmed or uncertain
+termination, definite failure to start, and unknown completion. Typed errors
+carry optional diagnostics. A report also declares whether the session permits
+another command; this is not an assertion that the target is uncompromised.
+
+Adapters must launch fresh shells with EOF on stdin, preserve target filesystem
+state, apply the configured output/deadline/descendant policy, and never retry
+automatically. Uncertain completion or protocol failure makes a session unusable;
+subsequent requests must be rejected without dispatch. Dropping an execution
+future requires discarding the session and notifying supervision. If termination
+cannot be confirmed at a deadline, supervision must end the trial.
+
+This increment defines the trait, data types, and adapter obligations. Concrete
+adapters and enforcement are still pending. The types have no wire encoding yet.
+The harness's `async_driver::CommandExecutor` remains the client-side interface;
+the future broker will translate between HTTP and `TargetSession`.
+
 ## Development container
 
 Copy these files into the new `thorough-but-unreliable` repository. Merge the flake outputs
