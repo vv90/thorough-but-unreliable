@@ -57,6 +57,7 @@
         ncurses
         nodejs
         shellcheck
+        stdenv.cc
         rustc
         cargo
         rustfmt
@@ -135,6 +136,7 @@
               "PATH=/home/dev/.nix-profile/bin:/home/dev/.local/state/nix/profile/bin:/bin"
               "SHELL=/bin/bash"
               "LANG=C.UTF-8"
+              "CC=gcc"
               "NIX_REMOTE=local"
               "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
