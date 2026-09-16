@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e7e623a8b5f7a3971bd8650d37ec404ee2740ebf5ab39e45060b047779b85fc6 # shrinks to outcome = Completed { output: CommandOutput { stdout: CapturedOutput { bytes: [], truncated: false }, stderr: CapturedOutput { bytes: [], truncated: false } }, completion: Signaled { signal: 1, source: ParentObserved }, session_state: Ready }

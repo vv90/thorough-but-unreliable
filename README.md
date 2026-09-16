@@ -149,8 +149,21 @@ step, or finished report. Each step is consumed when its result is supplied.
 `src/harness/async_driver.rs` provides corresponding asynchronous interfaces and
 `run(system_prompt, task, max_model_turns, &mut model, &mut executor).await`.
 It awaits one effect at a time and feeds its result into the pure core.
-`InferenceClient` implements its model interface; tests supply an in-memory
-command executor until the experiment command HTTP client is implemented.
+`InferenceClient` implements its model interface; `CommandClient` implements
+its command interface. `tests/http_loop.rs` runs the complete loop with both
+HTTP clients against scripted localhost endpoints. A shared script checks
+request order across both endpoints, exact command text and sequence numbers,
+the next inference request's results, and the final transcript. Independent JSON
+fixtures cover binary output, truncation, completion provenance, submission,
+recoverable rejection, and stopping after command or inference failures.
+Unexpected or missing requests fail the test; every scenario has a total timeout.
+These tests execute no shell commands and require neither Ollama nor VMs.
+
+Run this integration suite on its own with:
+
+```sh
+nix develop --command cargo test --locked --test http_loop
+```
 
 The core validates each complete assistant response before executing commands.
 Call IDs must be nonempty and unique within that response. Commands execute in
@@ -226,7 +239,7 @@ fields. `presentation.rs` provides a pure model-facing projection of target
 reports: UTF-8 output is text, other bytes are losslessly hex-encoded, and both
 carry explicit encoding/truncation metadata. Sequence, completion provenance,
 failure category, and session state are included. The original report stays in
-the transcript. This projection is not the future broker wire format.
+the transcript. This projection is separate from the broker wire format.
 A history containing a command-client failure or unusable target report cannot
 be encoded for another model turn. The serialized
 request is checked against its size limit before sending. Response bytes are
@@ -290,9 +303,36 @@ future requires discarding the session and notifying supervision. If termination
 cannot be confirmed at a deadline, supervision must end the trial.
 
 This increment defines the trait, data types, and adapter obligations. Concrete
-adapters and enforcement are still pending. The types have no wire encoding yet.
+adapters and enforcement are still pending. The separate command protocol maps
+these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 the future broker will translate between HTTP and `TargetSession`.
+
+## Command protocol
+
+[COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md) defines the version-1 HTTP/JSON
+harness-to-broker contract: `POST /v1/command`, strict tagged execution reports,
+hex-encoded output, and one outstanding command with no retries.
+`src/command_protocol` implements pure bounded request/report codecs, response
+correlation, and sequence tracking starting at 1. Properties cover lossless
+conversion, exact body limits, and terminal sequence states.
+
+`src/harness/command` supplies `CommandClient` and `CommandConfig`. Configuration
+specifies the full HTTP(S) `/v1/command` URL, connection and total-request
+timeouts, and request/response JSON byte limits. The total timeout must allow
+the broker's separately configured execution deadline, cleanup, and reporting.
+The client sends HTTP/1.1 with no redirects, retries, or environment proxies;
+HTTPS uses verified TLS through rustls. It requires HTTP 200 and exactly one
+`Content-Type: application/json` header without parameters (case-insensitive).
+Response accumulation is bounded even without `Content-Length`.
+
+The client assigns sequences starting at 1 and returns the complete correlated
+report. Every client error ends its session; an unusable target report is returned
+intact and prevents further dispatch. Cancelling a pending request also prevents
+reuse, but cannot stop remote execution. Do not replace the client within the
+same run to reset its sequence state. Fake-broker tests cover these behaviors,
+body limits, malformed replies, redirects, disconnects, and timeouts.
+The real broker and authentication remain pending.
 
 ## Manifest validation
 

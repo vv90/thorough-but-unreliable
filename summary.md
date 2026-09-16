@@ -64,9 +64,11 @@ use a physical machine without changing the harness command interface.
 ├── flake.nix / flake.lock
 ├── nixos/harness-vm.nix
 ├── scripts/run-harness-smoke.sh
+├── tests/http_loop.rs
 └── src
     ├── lib.rs
     ├── manifest.rs
+    ├── command_protocol/{mod.rs,wire.rs,tests.rs}
     ├── target/mod.rs
     ├── bin/harness.rs
     └── harness
@@ -75,6 +77,7 @@ use a physical machine without changing the harness command interface.
         ├── presentation.rs
         ├── driver.rs
         ├── async_driver.rs
+        ├── command/{mod.rs,tests.rs}
         ├── tests.rs
         └── inference
             ├── wire.rs
@@ -199,7 +202,7 @@ target reports.
 
 `src/target/mod.rs` defines the experiment-side `TargetSession` async trait and
 internal request/report types. Sessions bind one prepared target and its trusted
-execution policy. Requests carry only a broker-assigned sequence and command.
+execution policy. Requests carry only a run-scoped protocol sequence and command.
 Reports contain an `ExecutionOutcome`: only possibly-started outcomes have raw
 partial output/truncation. Completed executions carry parent/guest provenance and
 `u8` exit codes or positive `NonZeroU32` signals (with platform validation left to
@@ -217,8 +220,50 @@ and broker authentication/sequencing remain separate responsibilities.
 
 The interface, data types, and pure readiness derivation are implemented. A
 compiling adapter example and compile-fail examples exercise the public API.
-Concrete adapters and lifecycle enforcement, setup types, and wire encoding remain
-pending. The existing harness-side `CommandExecutor` is a separate interface.
+Concrete adapters and lifecycle enforcement and setup types remain pending.
+The existing harness-side `CommandExecutor` is a separate interface.
+
+### Command protocol
+
+`COMMAND_PROTOCOL.md` defines HTTP/1.1 `POST /v1/command`, strict JSON requests
+and tagged execution reports, lossless lowercase hex output, and no retries.
+Authentication is explicitly deferred. This protocol connects the harness to the
+broker; guest channels remain independent behind `TargetSession`.
+
+`src/command_protocol` implements pure codecs with bounded serialization and
+body-size checks before parsing, preserving all target outcomes and rejecting
+response sequence mismatches. A pure `SequenceTracker` starts at 1, reserves
+one outstanding command, rejects unexpected requests without advancing, and
+prevents reuse after terminal reports, mismatched reports, or abandonment.
+Sequence exhaustion cannot wrap. HTTP IO/enforcement and broker integration
+are separate. Property tests cover round trips, exact limits, correlation,
+sequence transitions, and malformed inputs.
+
+### Command HTTP client
+
+`src/harness/command` implements the async driver's `CommandExecutor` using
+the shared codecs and sequence tracker. `CommandConfig` supplies the full
+HTTP(S) `/v1/command` endpoint, connection/total timeouts, and JSON body bounds.
+Encoding borrows the command directly rather than cloning it before checking
+limits. Reqwest uses HTTP/1.1, verified TLS, no redirects/retries/environment
+proxies. Reports require HTTP 200 and exactly one unparameterized
+`Content-Type: application/json` header (case-insensitive).
+
+Body reads enforce limits independently of Content-Length, and the total
+timeout includes response-body reading. A valid correlated report is returned
+intact; only ready reports allow another sequence. Every client error ends the
+session, including local oversized-request rejection. Sequence reservation before
+network IO prevents reuse after cancellation of a pending future; external
+supervision must still handle remote execution. No client clone/reset is exposed.
+Dependency unwinds become typed failures where supported. Allocation and
+unavailable-session failures retain conservative completion uncertainty.
+
+Fake-broker tests cover ordered requests, recoverable and terminal reports,
+exact byte limits, malformed responses, sequence mismatches, HTTP status/content
+type, redirects, disconnects, chunked/EOF bodies, and timeouts/cancellation before
+headers and during body reads. A property checks lossless bounded accumulation
+and no buffer mutation on rejected chunks. Both HTTP clients also pass the full
+loop integration tests described below. Authentication is still deferred.
 
 ## Tests and validation
 
@@ -258,6 +303,18 @@ submission, protocol rejection, turn limits, and stopping after inference or
 command failures. Fault injection covers dependency unwinds during future
 construction and after suspension.
 
+`tests/http_loop.rs` uses both real HTTP clients and the public async driver with
+two scripted localhost endpoints. One coordinator checks global request order,
+request counts and payloads, and detects extra connections through completion
+and a short quiet period afterward. Every scenario has a total timeout and the
+server/run futures are joined without detached test tasks. Independent fixtures
+specify broker JSON, internal reports, and model-facing results. Five scenarios
+cover batch execution and submission; broker disconnect; unusable reports with
+partial output; recoverable rejection; and inference failure after commands.
+They check complete transcript preservation, binary output, truncation,
+completion provenance, and no further traffic after terminal outcomes. No shell
+commands execute. The Nix package source includes this integration test directory.
+
 The latest completed checks were:
 
 ```sh
@@ -286,7 +343,8 @@ test.
 
 ## Not implemented
 
-- Experiment command HTTP client and its shared protocol types.
+- Broker integration of the shared protocol.
+- Command protocol authentication (explicitly deferred).
 - `harness run`, expanded run manifest, system prompt/task loading, and a
   systemd evaluation service.
 - Run-wide time/message/output limits and structured event export.
@@ -299,21 +357,18 @@ test.
 
 ### Immediate next increment
 
-Define the narrow experiment command protocol and add its bounded HTTP client,
-implementing the async driver's `CommandExecutor`. Discuss the protocol before
-implementing it: authentication, request sequencing, timeout, output limits,
-and uncertain completion. Preserve the distinctions in the new `TargetSession`
-contract, including guest-reported completion and session usability. Test against
-a fake broker with no automatic retries.
+Discuss the minimal manifest expansion for `harness run`: task/system prompt,
+inference and command endpoints/settings, and the model-turn budget. Keep those
+validated inputs separate from IO. Agree on that schema before implementing it;
+authentication remains a later increment.
 
 ### Subsequent increments
 
-1. Run the full loop against fake inference and command endpoints.
-2. Expand the manifest and add `harness run`; package and boot-test that service
+1. Add `harness run` using the expanded manifest; package and boot-test that service
    in the harness VM.
-3. Implement one experiment broker/target adapter and its negative evidence
+2. Implement one experiment broker/target adapter and its negative evidence
    control, then build the experiment image.
-4. Connect both VM networks, verify the reachability matrix, and perform one
+3. Connect both VM networks, verify the reachability matrix, and perform one
    command round trip.
-5. Test real Ollama, add the minimum host controller/verifier, and run the first
+4. Test real Ollama, add the minimum host controller/verifier, and run the first
    recorded end-to-end trial.

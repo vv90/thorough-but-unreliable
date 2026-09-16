@@ -1,6 +1,7 @@
 //! Deterministic conversation loop and separate effectful adapters.
 
 pub mod async_driver;
+pub mod command;
 pub mod driver;
 pub mod inference;
 pub mod model_loop;

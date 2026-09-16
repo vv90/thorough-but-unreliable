@@ -133,6 +133,10 @@ pub struct CommandClientError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandClientErrorKind {
     Configuration,
+    InvalidRequest,
+    Allocation,
+    /// No further dispatch is allowed, including after cancellation or exhaustion.
+    SessionUnavailable,
     RequestTooLarge {
         limit: usize,
     },
@@ -160,7 +164,9 @@ impl CommandClientError {
     pub fn completion_unknown(&self) -> bool {
         !matches!(
             self.kind,
-            CommandClientErrorKind::Configuration | CommandClientErrorKind::RequestTooLarge { .. }
+            CommandClientErrorKind::Configuration
+                | CommandClientErrorKind::InvalidRequest
+                | CommandClientErrorKind::RequestTooLarge { .. }
         )
     }
 }

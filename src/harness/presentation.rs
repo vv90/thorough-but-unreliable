@@ -41,7 +41,7 @@ fn error_view(error: &ExecutionError) -> Value {
     json!({ "kind": kind, "diagnostic": error.diagnostic })
 }
 
-/// This projection is deliberately separate from the future broker wire format.
+/// This projection is deliberately separate from the broker wire format.
 /// It accepts terminal reports for inspection, though the loop will not send a
 /// further model request after a terminal outcome.
 pub fn command_report_view(report: &ExecutionReport) -> Value {

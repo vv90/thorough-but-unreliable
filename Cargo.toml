@@ -12,7 +12,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time", "sync"] }
 
 [lints.clippy]
 unwrap_used = "deny"

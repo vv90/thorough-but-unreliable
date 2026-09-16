@@ -74,8 +74,8 @@ pub trait TargetSession {
 /// No target selector, identity override, runtime flags, or policy overrides.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandRequest {
-    /// Broker-assigned identifier, scoped to this run. Sequence rules are the
-    /// broker protocol's responsibility; arithmetic must never wrap.
+    /// Protocol identifier, scoped to this run. The harness assigns it; the
+    /// broker enforces ordering. Arithmetic must never wrap.
     pub sequence: CommandSequence,
     /// Shell text interpreted only inside the target. An adapter must reject
     /// unrepresentable input (e.g. NUL in argv) before dispatch, without rewriting it.
@@ -96,8 +96,9 @@ impl ExecutionReport {
     }
 }
 
-/// Broker-assigned number scoped to a run, distinct from model tool-call IDs.
-/// The broker chooses the first value and enforces ordering; increment never wraps.
+/// Protocol number scoped to a run, distinct from model tool-call IDs.
+/// Version 1 starts at 1; the harness assigns numbers and the broker enforces
+/// ordering. Increment never wraps.
 ///
 /// ```compile_fail
 /// use thorough_but_unreliable::{target::CommandSequence, harness::types::ToolCallId};
