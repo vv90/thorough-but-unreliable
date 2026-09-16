@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "run_id": "connected-smoke",
+  "system_prompt": "system",
+  "task": "task",
+  "max_model_turns": 2,
+  "inference": {
+    "completion_url": "http://10.99.1.1:11434/v1/chat/completions",
+    "model": "fixture-model",
+    "max_tokens": 256,
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 10000,
+    "max_request_bytes": 65536,
+    "max_response_bytes": 65536
+  },
+  "command": {
+    "command_url": "http://10.99.2.2:8080/v1/command",
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 10000,
+    "max_request_bytes": 65536,
+    "max_response_bytes": 65536
+  }
+}

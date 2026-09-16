@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "run_id": "connected-smoke",
+  "outcome": { "kind": "submitted", "answer": "connected smoke complete" },
+  "history": [
+    { "role": "system", "content": "system" },
+    { "role": "user", "content": "task" },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{ "id": "command", "tool": { "kind": "execute_target_command", "command": "printf 'smoke\\n'" } }]
+    },
+    {
+      "role": "tool",
+      "call_id": "command",
+      "result": {
+        "kind": "execution_report",
+        "report": {
+          "sequence": 1,
+          "session_state": "ready",
+          "outcome": {
+            "kind": "completed",
+            "completion": { "kind": "exited", "code": 0, "source": "guest_reported" },
+            "output": {
+              "stdout": { "encoding": "utf8", "data": "smoke\n", "truncated": false },
+              "stderr": { "encoding": "utf8", "data": "", "truncated": false }
+            }
+          }
+        }
+      }
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{ "id": "submit", "tool": { "kind": "submit", "answer": "connected smoke complete" } }]
+    }
+  ]
+}

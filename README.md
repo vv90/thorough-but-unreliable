@@ -165,6 +165,74 @@ It creates a unique directory under `.artifacts` for each invocation. The
 commands in this README remain the source of truth; keep the wrapper synchronized
 with them when the workflow changes.
 
+### Run the connected VM smoke test with KVM
+
+This opt-in image runs the packaged harness automatically as UID/GID 900 after
+account readiness, network readiness, ISO mounting, and manifest validation.
+The ordinary `harness-image` and disconnected smoke script remain unchanged.
+
+On the KVM host with Nix build sandboxing enabled, from the repository root:
+
+```sh
+nix build --option sandbox true --keep-failed -L \
+  .#checks.x86_64-linux.harness-connected-smoke \
+  --out-link result-harness-connected-smoke
+```
+
+The convenience wrapper contains those same commands:
+
+```sh
+./scripts/run-harness-connected-smoke.sh
+```
+
+The check builds its image dependency and compiles/runs the Rust integration test
+inside the Nix builder. QEMU, the HTTP fixtures, and nc also execute inside that
+build sandbox. No host development shell or host Cargo invocation is required.
+The derivation requires a builder advertising the `kvm` system feature. `-L`
+shows build logs; `--keep-failed` retains the build directory for diagnosis if
+the check fails. A successful result may be reused by Nix for unchanged inputs.
+
+The test creates a fresh `.artifacts/harness-connected.XXXXXX` directory inside
+the build directory, a config ISO, and writable disk overlay. It starts two
+loopback HTTP fixtures, then QEMU with the normal static MAC addresses. Each NIC
+has a separate restricted user-network backend with an explicit `guestfwd` rule: inference
+`10.99.1.1:11434` and broker `10.99.2.2:8080` map to their respective fixture's
+ephemeral host port. There are no TAP devices, host network changes, shared host
+directories, or real target commands. QEMU uses `nc` for each forwarded connection;
+the derivation supplies QEMU, xorrisofs, and nc from pinned Nixpkgs.
+
+The backend networks use /24 masks to accommodate QEMU's internal gateway/DNS
+addresses, moved to `.254`/`.253`. The guest retains its original /24 inference
+and /30 command configuration, without a default route or DNS. `restrict=on`
+limits the user-network backends; this fixture wiring is not the eventual
+experiment network or proof of its isolation policy. See
+[QEMU user networking and guest forwarding](https://www.qemu.org/docs/master/system/qemu-manpage.html).
+
+The fixed manifest is `tests/fixtures/connected-manifest.json`. The fixtures
+require exactly three ordered requests: inference returns one command, the
+broker returns predetermined `smoke\n` output, and inference receives that result
+and submits. No shell command is executed by the fake broker. The guest saves
+`/var/lib/harness/report.json` as UID/GID 900 with mode 0600. A test-only verifier
+checks the complete report against `tests/fixtures/connected-report.json`, prints
+`harness connected smoke: PASS` or `FAIL`, and powers the VM off.
+
+The test requires successful QEMU exit, the guest PASS marker, and the exact
+HTTP exchange without missing/extra requests. It fails after 180 seconds, kills
+and reaps a stalled VM, and retains `console.log`, `stderr.log`, the ISO and overlay
+for inspection. Successful builds publish these under
+`result-harness-connected-smoke/artifacts/`; failed builds retain them in the
+build directory printed by Nix. The report remains inside the overlay; automatic
+report extraction is not added. Service startup is bounded to 60 seconds with no
+restart; an existing report is never overwritten. Each test creates a fresh overlay.
+
+Ordinary `cargo test` inside the devcontainer checks these same fixtures against
+the executable locally, but skips the KVM test. Build the KVM check explicitly:
+an ignored test in the ordinary suite is not a successful VM check. This workspace
+cannot boot the image without KVM; the external run remains required.
+
+Development commands below, including `nix develop`, run inside the devcontainer.
+Host-side build/test automation uses sandboxed Nix derivations.
+
 ## Deterministic harness core
 
 `src/harness/model_loop.rs` implements pure transitions: start with a system
@@ -371,8 +439,8 @@ nix run .#harness -- run --manifest PATH > report.json
 It creates a current-thread Tokio runtime, constructs both HTTP clients using the
 manifest settings, and drives the existing async loop. Both endpoints must be
 reachable from wherever the executable runs. No retries or automatic restart are
-added. The intended deployment is the `harness` account inside the harness VM;
-automatic systemd startup is a subsequent increment.
+added. The intended deployment is the `harness` account inside the harness VM.
+Automatic startup is currently enabled only in the connected smoke-test image.
 
 The command writes one final JSON object followed by a newline to stdout.
 Operational errors before a report exists, or while writing it, go to stderr.
@@ -429,7 +497,8 @@ They create temporary manifests, launch the actual binary, and check requests
 against fake inference/broker endpoints, stdout reports, stderr, and exit status.
 They execute no target commands and require no VM or Ollama. The existing
 `scripts/run-harness-smoke.sh` rebuilds and boots the package, but its disconnected
-VM only runs `check-config`; a connected VM run test is still a later step.
+VM only runs `check-config`. The separate connected smoke test above exercises
+automatic startup and the HTTP exchange inside the guest.
 
 New source files must be added to Git before using `.#harness` or the smoke
 script, because Git-backed flakes omit untracked files. During development,

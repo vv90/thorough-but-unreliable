@@ -93,9 +93,20 @@
         modules = [ ./nixos/harness-vm.nix ];
       };
 
+      nixosConfigurations.harness-connected-smoke = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = { inherit harnessPackage; };
+        modules = [
+          ./nixos/harness-vm.nix
+          ./nixos/harness-connected-smoke.nix
+        ];
+      };
+
       packages.${system} = {
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
+        harness-connected-smoke-image =
+          self.nixosConfigurations.harness-connected-smoke.config.system.build.image;
 
         devImage = pkgs.dockerTools.buildLayeredImage {
           name = "localhost/thorough-but-unreliable-dev";
@@ -153,6 +164,39 @@
         };
 
       };
+
+      checks.${system}.harness-connected-smoke = harnessPackage.overrideAttrs (old: {
+        pname = "harness-connected-smoke";
+        requiredSystemFeatures = [ "kvm" ];
+        preferLocalBuild = true;
+        allowSubstitutes = false;
+        nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [
+          pkgs.qemu_kvm
+          pkgs.xorriso
+          pkgs.netcat-openbsd
+        ];
+        HARNESS_SMOKE_IMAGE = "${
+          self.packages.${system}.harness-connected-smoke-image
+        }/harness-connected-smoke.qcow2";
+        cargoTestFlags = [
+          "--test"
+          "connected_vm"
+          "connected_vm_smoke"
+        ];
+        checkFlags = [
+          "--ignored"
+          "--exact"
+          "--nocapture"
+        ];
+        # Run the Rust test and all its child processes inside the builder.
+        # Successful builds publish the logs, ISO, and writable overlay.
+        installPhase = ''
+          runHook preInstall
+          mkdir -p "$out/artifacts"
+          cp -a .artifacts/. "$out/artifacts/"
+          runHook postInstall
+        '';
+      });
 
       devShells.${system}.default = pkgs.mkShell {
         packages = developmentTools;

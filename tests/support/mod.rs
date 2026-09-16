@@ -11,6 +11,7 @@ pub type TestError = Box<dyn std::error::Error + Send + Sync>;
 pub type TestResult<T = ()> = Result<T, TestError>;
 pub const LIMIT: usize = 65536;
 
+#[allow(dead_code)] // Different integration suites exercise different failures.
 pub enum Reply {
     Json(Value),
     Disconnect,

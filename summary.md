@@ -62,9 +62,9 @@ use a physical machine without changing the harness command interface.
 ├── Cargo.toml / Cargo.lock
 ├── IMPLEMENTATION.md
 ├── flake.nix / flake.lock
-├── nixos/harness-vm.nix
-├── scripts/run-harness-smoke.sh
-├── tests/{http_loop.rs,cli_run.rs,support/mod.rs}
+├── nixos/{harness-vm.nix,harness-connected-smoke.nix}
+├── scripts/{run-harness-smoke.sh,run-harness-connected-smoke.sh}
+├── tests/{http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
 └── src
     ├── lib.rs
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
@@ -150,7 +150,7 @@ It checks manifest-driven model/token settings, endpoints, request limits and
 turn budget, complete report output, failure reports, exit status, and no extra
 traffic. Child output/waits are bounded, and failed/timed-out children are killed
 and reaped. Pure properties check report preservation and failure payloads;
-writer tests inject errors/unwinds. The VM still invokes only `check-config`.
+writer tests inject errors/unwinds. The base VM still invokes only `check-config`.
 
 ### Deterministic loop core
 
@@ -362,15 +362,15 @@ nix build .#harness --no-link
 ```
 
 All 69 unit tests, 6 executable integration tests, 5 HTTP-loop integration tests,
-and 7 doctests passed. Clippy and the normal Git-backed Nix harness package build
-passed. New source/test files are staged so the normal flake includes them; no
-commit was made. The earlier README/smoke-manifest comparison and shell checks
-remain applicable; neither manifest example nor smoke script changed this step.
+1 local connected-fixture test, and 7 doctests passed. The explicit KVM test is
+ignored by ordinary Cargo/Nix package checks. Clippy and the normal Git-backed
+Nix harness package build passed. New source/test files are staged so the normal
+flake includes them; no commit was made. Rust/Nix formatting, shell syntax and
+ShellCheck pass. The connected image derivation and generated unit dependencies
+evaluate successfully, but the VM has not been booted here (no /dev/kvm).
 
-The user confirmed a successful KVM smoke test with the expanded manifest loader.
-The new `harness run` executable is verified locally and packaged, but the image
-still needs rebuilding and another boot smoke test on the KVM host. That test
-continues to exercise readiness and `check-config`, not connected loop execution.
+The user confirmed a successful disconnected KVM smoke test after `harness run`
+was packaged. The new connected smoke test still needs its first external run.
 
 ## Harness VM status
 
@@ -384,11 +384,46 @@ A read-only ISO labeled `HARNESS_CONFIG` mounts at `/run/harness-config` with
 packaged Rust binary. Absence of the ISO remains valid for a base-image boot
 test.
 
+### Opt-in connected smoke image
+
+`nixos/harness-connected-smoke.nix` extends the base image only for testing;
+`packages.x86_64-linux.harness-connected-smoke-image` builds it. `harness-run`
+requires/starts after account/network readiness, manifest checking and the ISO
+mount. It runs as UID/GID 900, writes report.json under /var/lib/harness with mode
+0600, refuses to overwrite an existing report, and never restarts automatically.
+The test-only result unit verifies successful service completion, report ownership
+and permissions, and complete JSON equality against the expected fixture, prints
+PASS/FAIL, and powers off. The normal image keeps validation-only startup.
+
+`tests/connected_vm.rs` reuses the scripted HTTP support to check three ordered
+requests and reject missing/extra traffic. The KVM case creates an ISO and fresh
+overlay under .artifacts, starts QEMU with separate restricted user networks and
+explicit guestfwd mappings to loopback fixtures, and requires the guest PASS
+marker and successful exit. A 180-second bound kills/reaps stalled QEMU; bounded
+console/stderr logs and artifacts remain for inspection. The report stays inside
+the overlay. No real target command runs. The ordinary local test checks the same
+fixtures against the executable; the KVM case must be requested with --ignored.
+
+README contains the authoritative commands. `scripts/run-harness-connected-smoke.sh`
+invokes only sandboxed `nix build` for `checks.x86_64-linux.harness-connected-smoke`.
+The check depends on the test image, requires KVM, and compiles/runs the Rust
+test, QEMU, fake endpoints, and nc inside the Nix builder. No host devshell or
+host Cargo execution is permitted; AGENTS.md records that boundary. The former
+connected-smoke development shell has been removed. Successful checks publish
+logs/ISO/overlay under result-harness-connected-smoke/artifacts; --keep-failed
+retains the build directory on failure. Unchanged successful checks may be cached.
+The new check derivation's KVM requirement, image dependency and test flags were
+evaluated. A temporary verification override ran the local fixture instead of
+QEMU and successfully installed its artifacts through the same Nix check recipe.
+The full sandboxed KVM check still requires external execution.
+The fake wiring is not the future experiment network or an isolation-policy test.
+
 ## Not implemented
 
 - Broker integration of the shared protocol.
 - Command protocol authentication (explicitly deferred).
-- A systemd evaluation service and connected VM run test.
+- Production run-service configuration and host report collection; the existing
+  automatic startup and connected VM test are opt-in smoke fixtures only.
 - Run-wide time/message/output limits and incremental structured event export.
 - Experiment broker, concrete target adapters, experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
@@ -399,17 +434,15 @@ test.
 
 ### Immediate next increment
 
-Discuss automatic `harness run` startup inside the VM: systemd dependencies,
-report storage and collection, and a connected smoke test with reachable fake
-inference/broker endpoints. Preserve the existing disconnected boot smoke test.
+Run `./scripts/run-harness-connected-smoke.sh` on the KVM host and inspect its
+result. Once that passes, discuss the first concrete broker/target adapter.
 Authentication remains a later increment.
 
 ### Subsequent increments
 
-1. Package and boot-test the run service in the harness VM.
-2. Implement one experiment broker/target adapter and its negative evidence
+1. Implement one experiment broker/target adapter and its negative evidence
    control, then build the experiment image.
-3. Connect both VM networks, verify the reachability matrix, and perform one
+2. Connect both VM networks, verify the reachability matrix, and perform one
    command round trip.
-4. Test real Ollama, add the minimum host controller/verifier, and run the first
+3. Test real Ollama, add the minimum host controller/verifier, and run the first
    recorded end-to-end trial.
