@@ -64,7 +64,7 @@ use a physical machine without changing the harness command interface.
 ├── flake.nix / flake.lock
 ├── nixos/harness-vm.nix
 ├── scripts/run-harness-smoke.sh
-├── tests/http_loop.rs
+├── tests/{http_loop.rs,cli_run.rs,support/mod.rs}
 └── src
     ├── lib.rs
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
@@ -75,6 +75,8 @@ use a physical machine without changing the harness command interface.
         ├── types.rs
         ├── model_loop.rs
         ├── presentation.rs
+        ├── report.rs / report/tests.rs
+        ├── runner.rs
         ├── driver.rs
         ├── async_driver.rs
         ├── command/{mod.rs,tests.rs}
@@ -97,10 +99,11 @@ The flake exposes `packages.x86_64-linux.harness` and
 the locked Cargo package. The pinned development shell and development OCI
 image include Rust, Cargo, rustfmt, Clippy, and rust-analyzer.
 
-The only current executable operation is:
+The executable operations are:
 
 ```text
 harness check-config --manifest PATH
+harness run --manifest PATH
 ```
 
 The version-1 schema now requires `run_id`, inline `system_prompt` and `task`,
@@ -124,7 +127,30 @@ manifest to 1 MiB and contain dependency unwinds; reader allocation is fallible.
 Direct Serde callers must supply their own source-byte bound. Properties cover
 preservation, numeric/text domains, timeout ordering, entry-point agreement, and
 reader chunking. Configuration validation never constructs clients or contacts
-endpoints. The executable does not start the model loop yet.
+endpoints. `check-config` retains its validation-only behavior.
+
+### Executable run orchestration and final report
+
+`src/harness/runner.rs` loads the manifest, creates a current-thread Tokio runtime,
+constructs both clients from its settings, and drives the async loop. Tokio is
+now a runtime dependency; process support is enabled only for tests. No retries
+or automatic restart are added. `src/harness/report.rs` is a pure version-1 JSON
+projection of the entire terminal RunReport, including run ID, outcome, and
+ordered history. Target results retain lossless output, provenance, and usability;
+typed failures retain payloads and completion uncertainty. README specifies the
+report structure. The CLI emits JSON plus a newline to stdout and flushes it;
+setup/output failures produce stderr diagnostics. Exit 0 requires submission and
+successful report output; everything else exits 1. Submission is not a verifier
+verdict. Output failure can leave a partial document. Final reports are not crash
+recovery logs, and no run-wide output/history bound is implemented yet.
+
+`tests/cli_run.rs` launches the actual binary with temporary manifests against
+the same scripted endpoints as `tests/http_loop.rs` (shared support module).
+It checks manifest-driven model/token settings, endpoints, request limits and
+turn budget, complete report output, failure reports, exit status, and no extra
+traffic. Child output/waits are bounded, and failed/timed-out children are killed
+and reaped. Pure properties check report preservation and failure payloads;
+writer tests inject errors/unwinds. The VM still invokes only `check-config`.
 
 ### Deterministic loop core
 
@@ -332,17 +358,19 @@ The latest completed checks were:
 nix develop --command cargo test --locked
 nix develop --command cargo clippy --locked --all-targets -- -D warnings
 nix develop --command cargo fmt --check
-nix build "path:$PWD#harness" --no-link
+nix build .#harness --no-link
 ```
 
-All 65 unit tests, 5 HTTP-loop integration tests, and 7 doctests passed. Clippy,
-formatting, shell syntax/ShellCheck, and the Nix harness package build passed.
-The README and smoke-script manifests were compared exactly and accepted by
-`harness check-config`; the old two-field manifest was rejected.
+All 69 unit tests, 6 executable integration tests, 5 HTTP-loop integration tests,
+and 7 doctests passed. Clippy and the normal Git-backed Nix harness package build
+passed. New source/test files are staged so the normal flake includes them; no
+commit was made. The earlier README/smoke-manifest comparison and shell checks
+remain applicable; neither manifest example nor smoke script changed this step.
 
-The original harness image passed its KVM smoke test after the Rust manifest
-loader was installed. The expanded manifest loader has been checked locally;
-the image still needs rebuilding and a KVM smoke test with a regenerated ISO.
+The user confirmed a successful KVM smoke test with the expanded manifest loader.
+The new `harness run` executable is verified locally and packaged, but the image
+still needs rebuilding and another boot smoke test on the KVM host. That test
+continues to exercise readiness and `check-config`, not connected loop execution.
 
 ## Harness VM status
 
@@ -360,9 +388,8 @@ test.
 
 - Broker integration of the shared protocol.
 - Command protocol authentication (explicitly deferred).
-- `harness run`, wiring validated run settings to the clients/loop, and a systemd
-  evaluation service.
-- Run-wide time/message/output limits and structured event export.
+- A systemd evaluation service and connected VM run test.
+- Run-wide time/message/output limits and incremental structured event export.
 - Experiment broker, concrete target adapters, experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
@@ -372,10 +399,10 @@ test.
 
 ### Immediate next increment
 
-Discuss `harness run --manifest PATH`: consume the validated manifest, construct
-both HTTP clients, drive the async loop, and report its terminal outcome. Agree
-on output and exit-status behavior before implementation. Authentication remains
-a later increment.
+Discuss automatic `harness run` startup inside the VM: systemd dependencies,
+report storage and collection, and a connected smoke test with reachable fake
+inference/broker endpoints. Preserve the existing disconnected boot smoke test.
+Authentication remains a later increment.
 
 ### Subsequent increments
 

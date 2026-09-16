@@ -219,9 +219,8 @@ The turn budget bounds model calls. Zero permits no calls; commands in the last
 allowed response finish while the target remains usable, before the budget
 prevents another model request.
 A submission or failure on that last turn keeps its specific outcome.
-Run-wide wall-clock/output limits, event export,
-and a `harness run` CLI are future increments. The existing VM smoke test still
-exercises manifest loading.
+Run-wide wall-clock/output limits and incremental event export are future
+increments. The existing VM smoke test still exercises manifest loading.
 
 Dependency calls catch unwinding panics as explicit failures and stop. Discard
 the adapters after such a failure. Process aborts cannot be caught; the driver
@@ -360,6 +359,81 @@ reuse, but cannot stop remote execution. Do not replace the client within the
 same run to reset its sequence state. Fake-broker tests cover these behaviors,
 body limits, malformed replies, redirects, disconnects, and timeouts.
 The real broker and authentication remain pending.
+
+## Run the harness
+
+The executable supports running one trial from the validated manifest:
+
+```sh
+nix run .#harness -- run --manifest PATH > report.json
+```
+
+It creates a current-thread Tokio runtime, constructs both HTTP clients using the
+manifest settings, and drives the existing async loop. Both endpoints must be
+reachable from wherever the executable runs. No retries or automatic restart are
+added. The intended deployment is the `harness` account inside the harness VM;
+automatic systemd startup is a subsequent increment.
+
+The command writes one final JSON object followed by a newline to stdout.
+Operational errors before a report exists, or while writing it, go to stderr.
+Exit status `0` means the model submitted an answer and the report was written
+and flushed successfully. Status `1` means any other outcome or an operational
+failure. Submission does not establish isolation success; that requires the
+external verifier. Keep the JSON report even when the exit status is nonzero.
+
+The report has these top-level fields:
+
+```json
+{
+  "version": 1,
+  "run_id": "example",
+  "outcome": {"kind": "submitted", "answer": "..."},
+  "history": []
+}
+```
+
+The actual `history` contains every recorded message, in order. System/user
+messages have `role` and `content`; assistant messages have `role`, nullable
+`content`, and `tool_calls`. Each call contains its exact `id` and a `tool` object:
+`{"kind":"execute_target_command","command":"..."}` or
+`{"kind":"submit","answer":"..."}`. Tool messages have `role`, `call_id`, and
+a tagged `result`: `{"kind":"execution_report","report":...}` or
+`{"kind":"command_client_failure","error":...}`.
+
+Execution reports use the lossless presentation described above: raw output is
+represented as UTF-8 or hex with explicit encoding/truncation, preserving sequence,
+completion provenance, session usability, and uncertain outcomes. Failures retain
+their typed `category` object, nullable `diagnostic`, and `completion_unknown`.
+Category payloads include HTTP `status`, byte `limit`, unsupported tool `name`, or
+mismatched `expected`/`received` sequences where applicable.
+
+Outcome kinds are `submitted`, `early_termination`, `model_turn_limit`,
+`protocol_error`, `model_failure`, `command_client_failure`, and
+`target_session_unusable`. Failure outcomes include their `error`; command-client
+failure and unusable-session outcomes identify the `call_id`. Protocol errors
+distinguish empty/duplicate call IDs, multiple submissions, and mixed submission
+and commands. The final report schema is separate from the broker protocol.
+
+Reports are emitted only after the loop finishes; this is not a crash-recovery
+log. Output failure can leave a partial JSON document. Process termination can
+lose the report while a remote command continues; do not restart the same trial
+blindly. Run-wide history/report size limits and host-side collection are pending.
+
+Run the executable integration tests locally with:
+
+```sh
+nix develop --command cargo test --locked --test cli_run
+```
+
+They create temporary manifests, launch the actual binary, and check requests
+against fake inference/broker endpoints, stdout reports, stderr, and exit status.
+They execute no target commands and require no VM or Ollama. The existing
+`scripts/run-harness-smoke.sh` rebuilds and boots the package, but its disconnected
+VM only runs `check-config`; a connected VM run test is still a later step.
+
+New source files must be added to Git before using `.#harness` or the smoke
+script, because Git-backed flakes omit untracked files. During development,
+`nix build "path:$PWD#harness" --no-link` also includes untracked source files.
 
 ## Manifest validation
 

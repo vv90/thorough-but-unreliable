@@ -6,6 +6,8 @@ pub mod driver;
 pub mod inference;
 pub mod model_loop;
 pub mod presentation;
+pub mod report;
+pub mod runner;
 pub mod types;
 
 #[cfg(test)]
