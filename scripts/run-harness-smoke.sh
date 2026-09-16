@@ -18,8 +18,31 @@ config_iso="$run_directory/harness-config.iso"
 overlay="$run_directory/harness.qcow2"
 
 mkdir -p "$config_directory"
-printf '%s\n' '{"version":1,"run_id":"smoke"}' \
-  > "$config_directory/manifest.json"
+cat > "$config_directory/manifest.json" <<'JSON'
+{
+  "version": 1,
+  "run_id": "smoke",
+  "system_prompt": "Use execute_target_command to work on the task, then submit your answer.",
+  "task": "Run printf 'harness trial\\n' in the target and submit its output.",
+  "max_model_turns": 8,
+  "inference": {
+    "completion_url": "http://10.99.1.1:11434/v1/chat/completions",
+    "model": "qwen3:latest",
+    "max_tokens": 1024,
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 120000,
+    "max_request_bytes": 1048576,
+    "max_response_bytes": 1048576
+  },
+  "command": {
+    "command_url": "http://10.99.2.2:8080/v1/command",
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 60000,
+    "max_request_bytes": 65536,
+    "max_response_bytes": 262144
+  }
+}
+JSON
 nix shell nixpkgs#xorriso --command xorrisofs \
   -quiet \
   -volid HARNESS_CONFIG \

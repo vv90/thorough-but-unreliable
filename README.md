@@ -84,12 +84,35 @@ revision; repeat this smoke test after rebuilding the image.
 
 ### Test per-run configuration media
 
-Create a minimal manifest and place it in an ISO labeled `HARNESS_CONFIG`:
+Create a run manifest and place it in an ISO labeled `HARNESS_CONFIG`:
 
 ```sh
 mkdir -p .artifacts/harness-config
-printf '%s\n' '{"version":1,"run_id":"smoke"}' \
-  > .artifacts/harness-config/manifest.json
+cat > .artifacts/harness-config/manifest.json <<'JSON'
+{
+  "version": 1,
+  "run_id": "smoke",
+  "system_prompt": "Use execute_target_command to work on the task, then submit your answer.",
+  "task": "Run printf 'harness trial\\n' in the target and submit its output.",
+  "max_model_turns": 8,
+  "inference": {
+    "completion_url": "http://10.99.1.1:11434/v1/chat/completions",
+    "model": "qwen3:latest",
+    "max_tokens": 1024,
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 120000,
+    "max_request_bytes": 1048576,
+    "max_response_bytes": 1048576
+  },
+  "command": {
+    "command_url": "http://10.99.2.2:8080/v1/command",
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 60000,
+    "max_request_bytes": 65536,
+    "max_response_bytes": 262144
+  }
+}
+JSON
 nix shell nixpkgs#xorriso --command xorrisofs \
   -quiet \
   -volid HARNESS_CONFIG \
@@ -115,17 +138,21 @@ harness config: manifest validated run_id="smoke"
 
 Without an attached configuration ISO, the guest still boots and prints
 `harness config: no configuration media attached`. An attached manifest must be
-a JSON object containing exactly `version` and `run_id`; `version` must equal
-`1`, and `run_id` must be a nonempty string. The typed Rust loader enforces this
-schema. It can also be run directly as:
+a JSON object matching the schema above, with every field supplied explicitly.
+The typed Rust loader enforces the [manifest rules](#manifest-validation).
+It can also be run directly as:
 
 ```sh
 nix run .#harness -- check-config --manifest PATH
 ```
 
-That two-field manifest remains the current boot-smoke schema. Add only the
-fields needed to launch the harness, then update this section and the
-convenience script when that schema changes.
+This expands the early version-1 schema; old two-field manifests are rejected.
+Regenerate the configuration ISO when rebuilding the image. The endpoint
+addresses, broker port, model, and limits above are example settings for a future
+connected trial. The boot check only validates configuration and does not contact
+either endpoint, so the disconnected smoke test still works. Before a real run,
+choose a model available at the inference endpoint and allow enough command
+request time for the broker's execution deadline, cleanup, and reporting.
 
 For convenience, the following wrapper runs the complete build, manifest, ISO,
 fresh-overlay and QEMU sequence above:
@@ -336,12 +363,37 @@ The real broker and authentication remain pending.
 
 ## Manifest validation
 
-`Manifest` has private fields and read-only `version()`/`run_id()` accessors.
-`from_slice` performs pure object/schema/semantic validation; file and reader
-methods provide the IO boundary. Direct Serde deserialization goes through the
-same validation, so it cannot bypass the version or nonempty run-ID checks.
-Nonobjects, duplicate fields, unknown fields, and trailing JSON are rejected.
-Reader failures, including unwinding reader dependencies, return explicit errors.
+`Manifest`, `InferenceSettings`, `CommandSettings`, and `TransportLimits` have
+private fields and read-only accessors. Positive integer limits use nonzero types;
+URLs are parsed, and timeouts become `Duration` values. No HTTP client is built
+and no endpoint reachability is checked during validation.
+
+- `version` must equal `1`; `run_id` must be nonempty.
+- `system_prompt`, `task`, and `inference.model` must contain non-whitespace text.
+  Text is preserved exactly, including whitespace, Unicode, and line breaks.
+  Prompts are inline strings, with no file loading or environment substitution.
+- `max_model_turns`, `inference.max_tokens`, and each timeout in milliseconds
+  must be integers from `1` to `4294967295`. The timeout ceiling is approximately
+  49.7 days, allowing pure validation without reading a platform clock.
+- Each connection timeout must not exceed its total request timeout. The total
+  includes response-body reading. The broker's execution deadline is configured
+  separately, so its relationship to the command timeout cannot yet be checked.
+- Byte limits must be positive integers no larger than the platform's `isize::MAX`
+  (`9223372036854775807` on the x86_64 harness). These are JSON-body limits,
+  including encoding overhead; validation does not guarantee that a particular
+  conversation or captured command output fits them.
+- URLs must use HTTP(S), have a host, and have exactly `/v1/chat/completions` for
+  inference or `/v1/command` for commands after URL parsing. Credentials, queries,
+  and fragments are rejected. Standard URL normalization applies. Authentication
+  remains deferred.
+
+All fields are required. Nonobjects (including positional arrays), duplicate
+fields, unknown fields, incorrect types, and trailing JSON are rejected at every
+object level. `from_slice` performs pure validation; file/reader methods provide
+the IO boundary. These loaders cap the complete manifest at 1 MiB, including JSON
+syntax and inline text. Direct Serde deserialization enforces the same schema and
+semantics, but its caller must bound the source bytes. Reader failures, allocation
+failures, and dependency unwinds at the loader boundaries return explicit errors.
 
 ## Development container
 

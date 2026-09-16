@@ -1,20 +1,27 @@
 use serde::{Deserialize, Deserializer, de};
 use std::{
+    collections::TryReserveError,
     fmt,
     fs::File,
-    io::{BufReader, Read},
+    io::Read,
+    num::{NonZeroU32, NonZeroUsize},
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
+    time::Duration,
 };
 
-/// A validated version-1 manifest. Every construction/deserialization path checks
-/// the schema; its fields cannot be changed after validation.
+mod wire;
+
+/// Includes JSON syntax, escaping, and inline prompt/task text.
+pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+
+/// Validated run settings. Fields are private and exposed only for reading.
 ///
 /// ```compile_fail
 /// use thorough_but_unreliable::manifest::Manifest;
 /// let invalid = Manifest { run_id: String::new() };
 /// ```
-/// Direct Serde deserialization performs the same validation:
+/// Direct Serde deserialization also validates the schema and semantics:
 ///
 /// ```
 /// use thorough_but_unreliable::manifest::Manifest;
@@ -23,46 +30,80 @@ use std::{
 #[derive(Debug, PartialEq, Eq)]
 pub struct Manifest {
     run_id: String,
+    system_prompt: String,
+    task: String,
+    max_model_turns: NonZeroU32,
+    inference: InferenceSettings,
+    command: CommandSettings,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawManifest {
-    version: u64,
-    run_id: String,
+#[derive(Debug, PartialEq, Eq)]
+pub struct InferenceSettings {
+    completion_url: reqwest::Url,
+    model: String,
+    max_tokens: NonZeroU32,
+    transport: TransportLimits,
 }
 
-/// Require an actual object, preserving duplicate-field checks in Serde.
-fn deserialize_raw<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RawManifest, D::Error> {
-    struct ObjectVisitor;
-    impl<'de> de::Visitor<'de> for ObjectVisitor {
-        type Value = RawManifest;
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("a manifest object")
-        }
-        fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-            RawManifest::deserialize(de::value::MapAccessDeserializer::new(map))
-        }
+impl InferenceSettings {
+    pub fn completion_url(&self) -> &reqwest::Url {
+        &self.completion_url
     }
-    deserializer.deserialize_map(ObjectVisitor)
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn max_tokens(&self) -> NonZeroU32 {
+        self.max_tokens
+    }
+    pub fn transport(&self) -> &TransportLimits {
+        &self.transport
+    }
 }
 
-impl TryFrom<RawManifest> for Manifest {
-    type Error = ManifestError;
-    fn try_from(raw: RawManifest) -> Result<Self, Self::Error> {
-        if raw.version != 1 {
-            return Err(ManifestError::UnsupportedVersion(raw.version));
-        }
-        if raw.run_id.is_empty() {
-            return Err(ManifestError::EmptyRunId);
-        }
-        Ok(Self { run_id: raw.run_id })
+#[derive(Debug, PartialEq, Eq)]
+pub struct CommandSettings {
+    command_url: reqwest::Url,
+    transport: TransportLimits,
+}
+
+impl CommandSettings {
+    pub fn command_url(&self) -> &reqwest::Url {
+        &self.command_url
+    }
+    pub fn transport(&self) -> &TransportLimits {
+        &self.transport
+    }
+}
+
+/// Positive durations of at most u32::MAX milliseconds, with connection timeout
+/// no longer than total request timeout. Byte limits fit a Rust byte buffer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TransportLimits {
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    max_request_bytes: NonZeroUsize,
+    max_response_bytes: NonZeroUsize,
+}
+
+impl TransportLimits {
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
+    }
+    pub fn max_request_bytes(&self) -> NonZeroUsize {
+        self.max_request_bytes
+    }
+    pub fn max_response_bytes(&self) -> NonZeroUsize {
+        self.max_response_bytes
     }
 }
 
 impl<'de> Deserialize<'de> for Manifest {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(deserialize_raw(deserializer)?).map_err(de::Error::custom)
+        let raw: wire::RawManifest = wire::deserialize_object(deserializer)?;
+        guard(|| Self::try_from(raw)).map_err(de::Error::custom)
     }
 }
 
@@ -73,35 +114,80 @@ impl Manifest {
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+    pub fn task(&self) -> &str {
+        &self.task
+    }
+    pub fn max_model_turns(&self) -> NonZeroU32 {
+        self.max_model_turns
+    }
+    pub fn inference(&self) -> &InferenceSettings {
+        &self.inference
+    }
+    pub fn command(&self) -> &CommandSettings {
+        &self.command
+    }
 
-    /// Pure parsing and semantic validation, retaining typed validation failures.
+    /// Pure bounded parsing and semantic validation with typed errors.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, ManifestError> {
-        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let raw = deserialize_raw(&mut deserializer).map_err(ManifestError::Parse)?;
-        deserializer.end().map_err(ManifestError::Parse)?;
-        Self::try_from(raw)
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestError::TooLarge);
+        }
+        guard(|| {
+            let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+            let raw: wire::RawManifest =
+                wire::deserialize_object(&mut deserializer).map_err(ManifestError::Parse)?;
+            deserializer.end().map_err(ManifestError::Parse)?;
+            Self::try_from(raw)
+        })
     }
 
     pub fn from_path(path: &Path) -> Result<Self, ManifestError> {
-        let file = File::open(path).map_err(ManifestError::Read)?;
-        Self::from_reader(BufReader::new(file))
+        Self::from_reader(File::open(path).map_err(ManifestError::Read)?)
     }
 
-    /// Thin IO layer; custom readers may unwind, so contain that boundary.
+    /// Thin bounded IO layer, containing custom-reader unwinds.
     pub fn from_reader(mut reader: impl Read) -> Result<Self, ManifestError> {
-        let result = catch_unwind(AssertUnwindSafe(move || {
+        guard(move || {
             let mut bytes = Vec::new();
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(ManifestError::Read)?;
-            Self::from_slice(&bytes)
-        }));
-        match result {
-            Ok(result) => result,
-            Err(payload) => {
-                std::mem::forget(payload);
-                Err(ManifestError::DependencyPanicked)
+            let mut buffer = [0; 4096];
+            loop {
+                let count = match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(ManifestError::Read(error)),
+                };
+                let chunk = buffer.get(..count).ok_or_else(|| {
+                    ManifestError::Read(std::io::Error::other(
+                        "reader returned an invalid byte count",
+                    ))
+                })?;
+                if bytes
+                    .len()
+                    .checked_add(count)
+                    .is_none_or(|size| size > MAX_MANIFEST_BYTES)
+                {
+                    return Err(ManifestError::TooLarge);
+                }
+                bytes
+                    .try_reserve(count)
+                    .map_err(ManifestError::Allocation)?;
+                bytes.extend_from_slice(chunk);
             }
+            Self::from_slice(&bytes)
+        })
+    }
+}
+
+fn guard<T>(operation: impl FnOnce() -> Result<T, ManifestError>) -> Result<T, ManifestError> {
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(payload) => {
+            std::mem::forget(payload);
+            Err(ManifestError::DependencyPanicked)
         }
     }
 }
@@ -112,140 +198,42 @@ pub enum ManifestError {
     Parse(serde_json::Error),
     UnsupportedVersion(u64),
     EmptyRunId,
+    InvalidField {
+        field: &'static str,
+        reason: &'static str,
+    },
+    TooLarge,
+    Allocation(TryReserveError),
     DependencyPanicked,
 }
 
 impl fmt::Display for ManifestError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Read(error) => write!(formatter, "could not read manifest: {error}"),
-            Self::Parse(error) => write!(formatter, "invalid manifest JSON: {error}"),
-            Self::UnsupportedVersion(version) => write!(
-                formatter,
-                "unsupported manifest version {version}; expected 1"
-            ),
-            Self::EmptyRunId => write!(formatter, "run_id must not be empty"),
-            Self::DependencyPanicked => write!(formatter, "manifest reader dependency panicked"),
+            Self::Read(error) => write!(f, "could not read manifest: {error}"),
+            Self::Parse(error) => write!(f, "invalid manifest JSON: {error}"),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported manifest version {version}; expected 1")
+            }
+            Self::EmptyRunId => f.write_str("run_id must not be empty"),
+            Self::InvalidField { field, reason } => write!(f, "invalid {field}: {reason}"),
+            Self::TooLarge => write!(f, "manifest exceeds {MAX_MANIFEST_BYTES} bytes"),
+            Self::Allocation(error) => write!(f, "could not allocate manifest buffer: {error}"),
+            Self::DependencyPanicked => f.write_str("manifest dependency panicked"),
         }
     }
 }
-impl std::error::Error for ManifestError {}
+
+impl std::error::Error for ManifestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Parse(error) => Some(error),
+            Self::Allocation(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{Manifest, ManifestError};
-    use proptest::prelude::*;
-
-    fn parse(contents: &str) -> Result<Manifest, ManifestError> {
-        Manifest::from_slice(contents.as_bytes())
-    }
-
-    #[test]
-    fn accepts_the_current_manifest() -> Result<(), ManifestError> {
-        let manifest = parse(r#"{"version":1,"run_id":"smoke"}"#)?;
-
-        assert_eq!(
-            manifest,
-            Manifest {
-                run_id: "smoke".into(),
-            }
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_unknown_fields() {
-        let result = parse(r#"{"version":1,"run_id":"smoke","extra":true}"#);
-
-        assert!(matches!(result, Err(ManifestError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_missing_fields() {
-        let result = parse(r#"{"version":1}"#);
-
-        assert!(matches!(result, Err(ManifestError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_wrong_field_types() {
-        let result = parse(r#"{"version":1,"run_id":42}"#);
-
-        assert!(matches!(result, Err(ManifestError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_unsupported_versions() {
-        let result = parse(r#"{"version":2,"run_id":"smoke"}"#);
-
-        assert!(matches!(result, Err(ManifestError::UnsupportedVersion(2))));
-    }
-
-    #[test]
-    fn rejects_an_empty_run_id() {
-        let result = parse(r#"{"version":1,"run_id":""}"#);
-
-        assert!(matches!(result, Err(ManifestError::EmptyRunId)));
-    }
-
-    proptest! {
-        #[test]
-        fn every_entry_point_preserves_valid_run_ids(run_id in ".+") {
-            let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"run_id":run_id}))?;
-            let parsed = Manifest::from_slice(&bytes)?;
-            prop_assert_eq!(parsed.run_id(), &run_id);
-            prop_assert_eq!(parsed.version(), 1);
-            prop_assert_eq!(Manifest::from_reader(bytes.as_slice())?, serde_json::from_slice::<Manifest>(&bytes)?);
-        }
-
-        #[test]
-        fn no_deserialization_entry_point_accepts_invalid_semantics(version in any::<u64>(), run_id in any::<String>()) {
-            let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"run_id":run_id}))?;
-            let valid = version == 1 && !run_id.is_empty();
-            prop_assert_eq!(Manifest::from_slice(&bytes).is_ok(), valid);
-            prop_assert_eq!(Manifest::from_reader(bytes.as_slice()).is_ok(), valid);
-            prop_assert_eq!(serde_json::from_slice::<Manifest>(&bytes).is_ok(), valid);
-            let empty = br#"{"version":1,"run_id":""}"#;
-            prop_assert!(Manifest::from_slice(empty).is_err());
-            prop_assert!(serde_json::from_slice::<Manifest>(empty).is_err());
-        }
-    }
-
-    #[test]
-    fn every_entry_point_rejects_nonobjects_duplicate_fields_and_trailing_data() {
-        for bytes in [
-            br#"[1,"run"]"#.as_slice(),
-            br#"{"version":1,"version":1,"run_id":"run"}"#,
-            br#"{"version":1,"run_id":"run","run_id":"other"}"#,
-            br#"{"version":1,"run_id":"run"} {}"#,
-        ] {
-            assert!(Manifest::from_slice(bytes).is_err());
-            assert!(Manifest::from_reader(bytes).is_err());
-            assert!(serde_json::from_slice::<Manifest>(bytes).is_err());
-        }
-    }
-
-    #[test]
-    fn reader_failures_remain_explicit() {
-        struct FailedReader;
-        impl std::io::Read for FailedReader {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::other("injected read failure"))
-            }
-        }
-        struct UnwindingReader;
-        impl std::io::Read for UnwindingReader {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                // Fault injection only, not a production error-handling path.
-                std::panic::resume_unwind(Box::new("injected reader unwind"))
-            }
-        }
-        assert!(matches!(
-            Manifest::from_reader(FailedReader),
-            Err(ManifestError::Read(_))
-        ));
-        assert!(matches!(
-            Manifest::from_reader(UnwindingReader),
-            Err(ManifestError::DependencyPanicked)
-        ));
-    }
-}
+mod tests;

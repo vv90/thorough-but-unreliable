@@ -67,7 +67,7 @@ use a physical machine without changing the harness command interface.
 ├── tests/http_loop.rs
 └── src
     ├── lib.rs
-    ├── manifest.rs
+    ├── manifest.rs / manifest/{wire.rs,tests.rs}
     ├── command_protocol/{mod.rs,wire.rs,tests.rs}
     ├── target/mod.rs
     ├── bin/harness.rs
@@ -103,17 +103,28 @@ The only current executable operation is:
 harness check-config --manifest PATH
 ```
 
-The typed manifest schema is deliberately limited to:
+The version-1 schema now requires `run_id`, inline `system_prompt` and `task`,
+`max_model_turns`, and nested `inference`/`command` settings. README contains the
+complete example and field rules; the smoke script generates the same manifest.
+The earlier two-field manifest is no longer accepted. Inference settings include
+the completion URL, model, token limit, and HTTP limits; command settings include
+the broker URL and HTTP limits. All settings are explicit, without defaults.
 
-```json
-{"version":1,"run_id":"smoke"}
-```
+`Manifest` and nested settings have private fields and read-only accessors.
+Validated positive integers use nonzero types. URLs follow the existing clients'
+scheme/path/credential/query/fragment constraints. Timeouts are positive u32
+milliseconds, converted to Duration without clock IO; connection timeout cannot
+exceed total request timeout. Byte bounds fit isize::MAX. Prompt/task/model text
+must be nonblank and is preserved exactly; run IDs retain the nonempty rule.
 
-It rejects missing, extra, or incorrectly typed fields, unsupported versions,
-and empty run IDs. `Manifest` fields are private; accessors expose the validated
-values. Pure `from_slice` and direct Serde deserialization both validate, while
-reader/file functions provide IO. Nonobjects, duplicate fields, and trailing JSON
-are rejected. The model loop is not started by the executable yet.
+Pure `from_slice` and direct Serde deserialization validate schema and semantics;
+reader/file methods provide IO. Nested nonobjects, duplicate/missing/unknown
+fields, wrong types, and trailing JSON are rejected. Loader APIs bound the whole
+manifest to 1 MiB and contain dependency unwinds; reader allocation is fallible.
+Direct Serde callers must supply their own source-byte bound. Properties cover
+preservation, numeric/text domains, timeout ordering, entry-point agreement, and
+reader chunking. Configuration validation never constructs clients or contacts
+endpoints. The executable does not start the model loop yet.
 
 ### Deterministic loop core
 
@@ -324,10 +335,14 @@ nix develop --command cargo fmt --check
 nix build "path:$PWD#harness" --no-link
 ```
 
+All 65 unit tests, 5 HTTP-loop integration tests, and 7 doctests passed. Clippy,
+formatting, shell syntax/ShellCheck, and the Nix harness package build passed.
+The README and smoke-script manifests were compared exactly and accepted by
+`harness check-config`; the old two-field manifest was rejected.
+
 The original harness image passed its KVM smoke test after the Rust manifest
-loader was installed. The image has not been rebuilt since the loop and
-inference libraries were added; those libraries do not change its current
-startup behavior.
+loader was installed. The expanded manifest loader has been checked locally;
+the image still needs rebuilding and a KVM smoke test with a regenerated ISO.
 
 ## Harness VM status
 
@@ -345,8 +360,8 @@ test.
 
 - Broker integration of the shared protocol.
 - Command protocol authentication (explicitly deferred).
-- `harness run`, expanded run manifest, system prompt/task loading, and a
-  systemd evaluation service.
+- `harness run`, wiring validated run settings to the clients/loop, and a systemd
+  evaluation service.
 - Run-wide time/message/output limits and structured event export.
 - Experiment broker, concrete target adapters, experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
@@ -357,15 +372,14 @@ test.
 
 ### Immediate next increment
 
-Discuss the minimal manifest expansion for `harness run`: task/system prompt,
-inference and command endpoints/settings, and the model-turn budget. Keep those
-validated inputs separate from IO. Agree on that schema before implementing it;
-authentication remains a later increment.
+Discuss `harness run --manifest PATH`: consume the validated manifest, construct
+both HTTP clients, drive the async loop, and report its terminal outcome. Agree
+on output and exit-status behavior before implementation. Authentication remains
+a later increment.
 
 ### Subsequent increments
 
-1. Add `harness run` using the expanded manifest; package and boot-test that service
-   in the harness VM.
+1. Package and boot-test the run service in the harness VM.
 2. Implement one experiment broker/target adapter and its negative evidence
    control, then build the experiment image.
 3. Connect both VM networks, verify the reachability matrix, and perform one
