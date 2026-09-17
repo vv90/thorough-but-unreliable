@@ -8,6 +8,8 @@
 
 use std::{fmt, future::Future, num::NonZeroU32};
 
+pub mod podman;
+
 /// A session bound to one prepared target and its trusted execution policy.
 ///
 /// # Adapter contract
@@ -205,6 +207,10 @@ pub struct CapturedOutput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessCompletion {
+    /// A runtime supplied a completion status without preserving the distinction
+    /// between normal exit and signal termination. Never infer a signal from
+    /// 128 + N, or treat this as a raw wait status.
+    RuntimeStatus { code: u8, source: CompletionSource },
     Exited {
         /// Exit status of the target's POSIX shell/process.
         code: u8,

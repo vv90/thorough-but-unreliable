@@ -87,7 +87,7 @@ proptest! {
     ) {
         for session_state in [SessionState::Ready, SessionState::Unusable] {
             for source in [CompletionSource::ParentObserved, CompletionSource::GuestReported] {
-                for completion in [ProcessCompletion::Exited { code, source }, ProcessCompletion::Signaled { signal, source }] {
+                for completion in [ProcessCompletion::RuntimeStatus { code, source }, ProcessCompletion::Exited { code, source }, ProcessCompletion::Signaled { signal, source }] {
                     let outcome = ExecutionOutcome::Completed { output: output.clone(), completion, session_state };
                     prop_assert_eq!(outcome.session_state(), session_state);
                 }

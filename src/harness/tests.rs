@@ -60,6 +60,8 @@ fn command_result() -> impl Strategy<Value = ExecutionReport> {
         any::<u64>(),
         prop_oneof![
             (any::<u8>(), source())
+                .prop_map(|(code, source)| ProcessCompletion::RuntimeStatus { code, source }),
+            (any::<u8>(), source())
                 .prop_map(|(code, source)| ProcessCompletion::Exited { code, source }),
             (any::<std::num::NonZeroU32>(), source())
                 .prop_map(|(signal, source)| ProcessCompletion::Signaled { signal, source }),
@@ -271,6 +273,12 @@ proptest! {
         }
         if let ExecutionOutcome::Completed { completion, .. } = &report.outcome {
             let source = match completion {
+                ProcessCompletion::RuntimeStatus { code, source } => {
+                    prop_assert_eq!(view.pointer("/outcome/completion/kind"), Some(&serde_json::json!("runtime_status")));
+                    prop_assert_eq!(view.pointer("/outcome/completion/code"), Some(&serde_json::json!(code)));
+                    prop_assert!(view.pointer("/outcome/completion/signal").is_none());
+                    source
+                }
                 ProcessCompletion::Exited { code, source } => {
                     prop_assert_eq!(view.pointer("/outcome/completion/code"), Some(&serde_json::json!(code)));
                     prop_assert!(view.pointer("/outcome/completion/signal").is_none());

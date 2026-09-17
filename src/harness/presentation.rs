@@ -50,6 +50,9 @@ pub fn command_report_view(report: &ExecutionReport) -> Value {
             output, completion, ..
         } => {
             let completion = match completion {
+                ProcessCompletion::RuntimeStatus { code, source } => {
+                    json!({ "kind": "runtime_status", "code": code, "source": source_name(*source) })
+                }
                 ProcessCompletion::Exited { code, source } => {
                     json!({ "kind": "exited", "code": code, "source": source_name(*source) })
                 }

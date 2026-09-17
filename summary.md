@@ -70,7 +70,7 @@ use a physical machine without changing the harness command interface.
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
     ├── command_protocol/{mod.rs,wire.rs,tests.rs}
     ├── broker/{mod.rs,http.rs,state.rs}
-    ├── target/mod.rs
+    ├── target/{mod.rs,tests.rs,podman/}
     ├── bin/harness.rs
     └── harness
         ├── types.rs
@@ -243,8 +243,9 @@ internal request/report types. Sessions bind one prepared target and its trusted
 execution policy. Requests carry only a run-scoped protocol sequence and command.
 Reports contain an `ExecutionOutcome`: only possibly-started outcomes have raw
 partial output/truncation. Completed executions carry parent/guest provenance and
-`u8` exit codes or positive `NonZeroU32` signals (with platform validation left to
-adapters). Session usability is derived: unknown completion and uncertain deadlines
+`u8` exit/runtime status codes or positive `NonZeroU32` signals (with platform
+validation left to adapters). Runtime codes preserve uncertainty about exit versus
+signal termination. Session usability is derived: unknown completion and uncertain deadlines
 cannot declare readiness. Known completion/confirmed termination may still leave
 a session unusable. Command rejection and session failure have separate types;
 `NotStarted` cannot carry command output.
@@ -258,7 +259,8 @@ and broker authentication/sequencing remain separate responsibilities.
 
 The interface, data types, and pure readiness derivation are implemented. A
 compiling adapter example and compile-fail examples exercise the public API.
-Concrete adapters and lifecycle enforcement and setup types remain pending.
+The Podman adapter's pure core and validated setup types are implemented below;
+concrete IO and lifecycle enforcement remain pending.
 The existing harness-side `CommandExecutor` is a separate interface.
 
 ### Command protocol
@@ -446,13 +448,46 @@ report bounds/correlation, and config validity. No concrete adapter or executabl
 is added; the existing connected VM fixture is unchanged. Authentication remains
 explicitly deferred. See README and COMMAND_PROTOCOL.md for the public contract.
 
+### Podman adapter pure core
+
+`src/target/podman/{config,session,wire,stream}.rs` implements validated setup,
+bounded request/response codecs, an incremental non-TTY stream decoder, and a
+pure session core. It has no IO or `TargetSession` implementation yet. Settings
+bind a full container ID, local Unix socket, numeric user/group, absolute shell
+and directory, explicit environment overrides, and command/JSON/output/deadline
+limits. Environment overrides supplement the prepared container's base.
+
+Owned `Create`, `Start`, `Capture`, and `Inspect` stages borrow one session
+exclusively. Local invalid/oversized commands are rejected while ready; reserving
+an attempt pessimistically poisons the session until successful completion.
+Abandonment at any stage permanently prevents reuse. A complete stream and
+correlated stopped exec/container inspection are both required for readiness.
+Pending inspection can be repeated under the original deadline; start cannot.
+The decoder retains bounded stdout/stderr prefixes, drains excess, and preserves
+partial output on failure without allocating from advertised frame lengths.
+
+The approved policy allows background descendants within a trial. Descendants
+holding output streams open remain subject to the command deadline. Uncertain
+execution ends the session and requires external trial teardown. The future IO
+layer must enforce these timers, bound HTTP reads, validate upgrades, and notify
+supervision after cancellation/failure. The pure core only consumes observations.
+
+`ProcessCompletion::RuntimeStatus` and wire kind `runtime_status` preserve numeric
+runtime codes without inventing exit-versus-signal information. Codes remain u8;
+137 does not prove SIGKILL. Codecs, model presentation, final report and generated
+tests support this variant. Old version-1 decoders reject it, so update both ends
+together. Fifteen focused tests include properties for exact command preservation,
+chunk-independent bounded capture, cancellation/failure permanence, report
+correlation, status fidelity, exact JSON bounds, and validated container selectors.
+
 ## Not implemented
 
 - Command protocol authentication (explicitly deferred).
 - Production run-service configuration and host report collection; the existing
   automatic startup and connected VM test are opt-in smoke fixtures only.
 - Run-wide time/message/output limits and incremental structured event export.
-- Broker executable/deployment, concrete target adapters, experiment image, and evidence fixture.
+- Broker executable/deployment, Podman socket transport and runtime verification,
+  experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
 - First end-to-end isolation trial.
@@ -462,9 +497,11 @@ explicitly deferred. See README and COMMAND_PROTOCOL.md for the public contract.
 ### Immediate next increment
 
 The user confirmed the sandboxed connected VM smoke test passed. The broker
-library is now implemented against fake target sessions. Discuss the first
-concrete container adapter: how a prepared target is bound to execution policy,
-how commands are invoked, and how deadlines and descendants are handled.
+library is implemented against fake target sessions, and the Podman adapter's pure
+core is now implemented. The next increment is the thin Unix-socket transport
+implementing `TargetSession`, initially tested with fake runtime endpoints. Then
+verify it against actual Podman inside a disposable experiment VM; host automation
+must remain a sandboxed Nix derivation.
 Authentication remains a later increment. Keep development inside the devcontainer;
 host build/test automation must execute through sandboxed `nix build` derivations.
 

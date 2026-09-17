@@ -8,7 +8,7 @@ proptest! {
         run_id in any::<String>(), text in any::<String>(), answer in any::<String>(),
         commands in prop::collection::vec(any::<String>(), 0..12),
         bytes in prop::collection::vec(any::<u8>(), 0..512),
-        sequence in any::<u64>(), truncated in any::<bool>(), code in any::<u8>(),
+        sequence in any::<u64>(), truncated in any::<bool>(), code in any::<u8>(), runtime in any::<bool>(),
     ) {
         let id = ToolCallId::try_from("call".to_owned())?;
         let report = RunReport {
@@ -20,7 +20,8 @@ proptest! {
                     sequence: CommandSequence::new(sequence),
                     outcome: ExecutionOutcome::Completed {
                         output: CommandOutput { stdout: CapturedOutput { bytes: bytes.clone(), truncated }, stderr: CapturedOutput::default() },
-                        completion: ProcessCompletion::Exited { code, source: CompletionSource::GuestReported },
+                        completion: if runtime { ProcessCompletion::RuntimeStatus { code, source: CompletionSource::GuestReported } }
+                            else { ProcessCompletion::Exited { code, source: CompletionSource::GuestReported } },
                         session_state: SessionState::Unusable,
                     },
                 }) },
@@ -42,7 +43,7 @@ proptest! {
         let execution = value.pointer("/history/3/result/report").ok_or_else(|| TestCaseError::fail("missing report"))?;
         prop_assert_eq!(execution.get("sequence"), Some(&json!(sequence)));
         prop_assert_eq!(execution.get("session_state"), Some(&json!("unusable")));
-        prop_assert_eq!(execution.pointer("/outcome/completion"), Some(&json!({"kind":"exited","code":code,"source":"guest_reported"})));
+        prop_assert_eq!(execution.pointer("/outcome/completion"), Some(&json!({"kind":if runtime { "runtime_status" } else { "exited" },"code":code,"source":"guest_reported"})));
         let output = execution.pointer("/outcome/output/stdout").ok_or_else(|| TestCaseError::fail("missing stdout"))?;
         let expected = match std::str::from_utf8(&bytes) {
             Ok(text) => json!({"encoding":"utf8","data":text,"truncated":truncated}),

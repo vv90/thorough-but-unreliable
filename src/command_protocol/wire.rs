@@ -68,6 +68,11 @@ enum Outcome<'a> {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Completion {
+    RuntimeStatus {
+        code: u8,
+        #[serde(with = "source")]
+        source: CompletionSource,
+    },
     Exited {
         code: u8,
         #[serde(with = "source")]
@@ -318,6 +323,9 @@ impl From<Object<Error<'_>>> for ExecutionError {
 impl From<&ProcessCompletion> for Completion {
     fn from(value: &ProcessCompletion) -> Self {
         match *value {
+            ProcessCompletion::RuntimeStatus { code, source } => {
+                Self::RuntimeStatus { code, source }
+            }
             ProcessCompletion::Exited { code, source } => Self::Exited { code, source },
             ProcessCompletion::Signaled { signal, source } => Self::Signaled { signal, source },
         }
@@ -326,6 +334,7 @@ impl From<&ProcessCompletion> for Completion {
 impl From<Completion> for ProcessCompletion {
     fn from(value: Completion) -> Self {
         match value {
+            Completion::RuntimeStatus { code, source } => Self::RuntimeStatus { code, source },
             Completion::Exited { code, source } => Self::Exited { code, source },
             Completion::Signaled { signal, source } => Self::Signaled { signal, source },
         }

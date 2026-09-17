@@ -51,6 +51,13 @@ fn outcome() -> impl Strategy<Value = ExecutionOutcome> {
         (output(), any::<u8>(), source(), state()).prop_map(
             |(output, code, source, session_state)| ExecutionOutcome::Completed {
                 output,
+                completion: ProcessCompletion::RuntimeStatus { code, source },
+                session_state,
+            }
+        ),
+        (output(), any::<u8>(), source(), state()).prop_map(
+            |(output, code, source, session_state)| ExecutionOutcome::Completed {
+                output,
                 completion: ProcessCompletion::Exited { code, source },
                 session_state,
             }

@@ -55,10 +55,16 @@ Each outcome has exactly its variant's fields:
   even-length lowercase `hex` string and a required boolean `truncated` flag.
   Hex doubles raw output size. `truncated: false` does not prove a complete stream
   after execution or transport failure.
-- `completion` is either `{"kind":"exited","code":0,"source":"parent_observed"}`
-  or `{"kind":"signaled","signal":9,"source":"guest_reported"}`. Exit codes
+- `completion` is `{"kind":"exited","code":0,"source":"parent_observed"}`,
+  `{"kind":"signaled","signal":9,"source":"guest_reported"}`, or
+  `{"kind":"runtime_status","code":137,"source":"parent_observed"}`. Exit codes
   range from 0 to 255; signals range from 1 to 4294967295, with platform-specific
-  validation left to adapters. Either completion kind allows either source.
+  validation left to adapters. `runtime_status` also carries a code from 0 to 255,
+  but the runtime did not preserve whether it represents normal exit or signal
+  termination. Never infer SIGKILL from 137 or another signal from `128 + N`.
+  All three completion kinds allow either source. This extends the early-stage
+  version-1 schema; older decoders reject the new variant, so both sides must be
+  updated together before using it.
 - `session_state` is the string `ready` or `unusable`. A successful exit may
   still leave the session unusable. Guest-reported completion is not trusted
   evidence of containment or descendant termination.
@@ -164,3 +170,9 @@ that execution stopped. Watchdogs require a cooperative async adapter. No target
 lifecycle management, real adapter, broker executable, TLS, or authentication is
 included yet. `tests/broker.rs` exercises real HTTP with fake target sessions;
 this does not demonstrate target isolation.
+
+`src/target/podman` now supplies pure configuration, exec protocol/state logic,
+and bounded stream decoding for the first adapter. Its session is not yet a
+`TargetSession` implementation: Unix-socket IO, timers and supervision wiring
+remain pending. Runtime status preserves its uncertainty through this protocol,
+model-facing presentation, and the final harness report.

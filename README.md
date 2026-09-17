@@ -378,8 +378,10 @@ owns authentication and duplicate/out-of-order request rejection.
 An `ExecutionReport` contains a sequence and an `ExecutionOutcome`. Only outcomes
 where execution may have started carry raw stdout/stderr with truncation flags;
 `NotStarted` cannot contain command output. Completed executions distinguish
-parent-observed and guest-reported exit/signal status. Exit codes use `u8`, and
-signals use `NonZeroU32` with additional platform validation at the adapter boundary.
+parent-observed and guest-reported completion. `Exited` and `Signaled` require
+the corresponding observation; `RuntimeStatus` preserves a numeric status when
+the runtime loses that distinction. Codes use `u8`, and signals use `NonZeroU32`
+with additional platform validation at the adapter boundary.
 
 Session usability is derived from the outcome. `Unknown` and a deadline with
 `MayStillBeRunning` cannot carry a readiness override and always require discarding
@@ -396,11 +398,59 @@ subsequent requests must be rejected without dispatch. Dropping an execution
 future requires discarding the session and notifying supervision. If termination
 cannot be confirmed at a deadline, supervision must end the trial.
 
-This increment defines the trait, data types, and adapter obligations. Concrete
-adapters and enforcement are still pending. The separate command protocol maps
+The trait, data types, and adapter obligations are implemented. The first
+adapter's pure core is described below; actual execution and enforcement remain
+pending. The separate command protocol maps
 these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 `src/broker` translates between HTTP and `TargetSession`.
+
+### Podman adapter core
+
+`src/target/podman` contains pure logic for one prepared container. `Config::new`
+validates trusted `Settings`: an absolute Linux Unix socket path, a full 64-digit
+lowercase hexadecimal container ID, numeric UID/GID, absolute shell and working
+directory paths, explicit environment overrides, and positive command/JSON/capture
+limits and deadline. Setup must still establish socket permissions, container
+identity, resource policy, and the container's base environment. Environment
+overrides supplement that base; nothing expands variables from the broker.
+
+`Session::begin` rejects NUL-containing or oversized commands before reservation.
+It passes accepted text unchanged as the third argument in `[shell, "-c", command]`.
+The generated exec configuration uses EOF stdin, separate stdout/stderr, no TTY,
+and no privilege escalation. It targets Podman's unversioned Docker-compatible
+exec endpoints. The API mapping follows Podman's
+[exec handlers](https://github.com/containers/podman/blob/main/pkg/api/server/register_exec.go)
+and [stream framing](https://github.com/containers/podman/blob/main/pkg/bindings/containers/attach.go).
+
+Execution stages consume one another: `Create` → `Start` → `Capture` → `Inspect`.
+Each borrows the session exclusively, preventing overlapping attempts. Reservation
+immediately marks the session unusable; dropping or forgetting any unfinished
+stage leaves it that way. Only clean output EOF followed by an inspection proving
+the matching exec stopped in the matching container restores readiness. A pending
+inspection permits another read under the same deadline, never another start.
+
+The stream decoder accepts arbitrary chunk boundaries, retains separate output
+prefixes, and discards excess bytes while maintaining frame alignment. Frame
+lengths never determine allocations. Partial EOF, invalid framing, runtime error
+frames, malformed JSON, correlation failures, and effect failures terminate the
+session while preserving already captured output. Inspection produces
+`RuntimeStatus`, including for code 137; it never guesses a termination signal.
+
+The chosen descendant policy permits background processes to persist within a
+trial. Descendants holding output streams open remain subject to the command
+deadline. Readiness is permission to continue, not evidence that descendants
+have stopped or that isolation held. A failure after start may have been sent is
+uncertain; a deadline then reports `MayStillBeRunning` and requires trial teardown.
+
+This is a pure core, not yet a `TargetSession` implementation. The next increment
+is Unix-socket transport with bounded HTTP reads, upgrade validation, one total
+deadline covering all stages, and supervision notification. No container runs in
+these tests. Run them inside the devcontainer:
+
+```sh
+nix develop --command cargo test --locked --lib target::podman
+```
 
 ## Command protocol
 
@@ -462,8 +512,8 @@ They exercise the real harness client against the broker, ordered admission,
 malformed and oversized input, chunked bodies, overlapping requests, disconnects,
 graceful shutdown, connection/read limits, adapter watchdogs/unwinds, and invalid
 reports. Pure properties check exact byte bounds, non-mutating rejected appends,
-report correlation, and configuration limits. The next increment is a concrete
-target adapter; its execution and descendant-cleanup policy still need discussion.
+report correlation, and configuration limits. The Podman adapter core above is
+the next layer; its socket transport and real-runtime verification remain pending.
 
 ## Run the harness
 
