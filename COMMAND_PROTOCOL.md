@@ -103,8 +103,14 @@ The harness client also ends its local session after pre-dispatch errors such
 as an oversized request, consistent with the loop's stop-on-client-error policy.
 This differs from a valid broker report rejecting a command while remaining ready.
 
-The future HTTP broker should use `400` for invalid JSON/schema, `413` for an
+The HTTP broker uses `400` for invalid JSON/schema, `413` for an
 oversized body, and `409` for an unexpected sequence or outstanding command.
+It also rejects wrong paths (`404`), methods (`405`), media types or content
+encodings (`415`), `Expect` headers (`417`), and HTTP versions other than 1.1
+(`505`). Requests require exactly one unparameterized JSON content type.
+Incomplete bodies time out (`408`); framing/header failures may close the
+connection. Invalid or oversized adapter reports produce `500` and end the
+session. Error responses have empty bodies.
 These are HTTP failures, not target reports. The client treats every status other
 than `200` as failure to obtain a valid execution report and makes no assumption
 that execution did not occur. It must not follow redirects or retry requests.
@@ -113,8 +119,10 @@ Trusted setup supplies request/response byte limits, execution deadline, capture
 limits, and a longer bounded client timeout that allows cleanup and reporting.
 The JSON limits include escaping, diagnostics, and hex expansion. The adapter's
 capture limits must leave enough room for a complete response under that bound.
-The broker enforces the execution deadline; the client timeout covers sending
-and reading the whole response and cannot confirm termination.
+The adapter enforces its execution deadline and cleanup policy. The broker adds
+a watchdog covering the entire adapter call; expiration cannot confirm
+termination. The client timeout covers sending and reading the whole response
+and cannot confirm termination either.
 
 ## Current implementation
 
@@ -125,4 +133,34 @@ HTTP client, bounding body reads, enforcing status/content type/timeouts, and
 invoking sequence transitions around IO. A pending request cancelled after
 sequence reservation prevents reuse even though no report was obtained.
 Local fake-broker tests cover transport failures and session reuse rules.
-The broker and authentication remain unimplemented.
+
+`src/broker` implements the server as a library over a caller-supplied listener
+and one prepared `TargetSession`. `Config::new` requires positive request/response
+byte limits, connection capacity, and read/adapter/write timeouts. Byte limits
+must fit `isize::MAX`; the timeout sum must be at most one day. Connections have
+at most 32 headers and a 16 KiB HTTP read buffer. Fixed-length and chunked bodies
+are bounded during accumulation; trailers and content encodings are rejected.
+Keep-alive is disabled, so each connection carries one request and one response.
+
+A single owner holds the adapter, sequence tracker, and accepted request. A
+capacity-one admission permit lasts through execution and local response-write
+completion. Other complete valid requests receive `409` while busy; they cannot
+queue for later execution. Invalid requests and sequence conflicts do not
+advance the counter. There are no retries or detached execution tasks.
+
+HTTP disconnects do not drop the adapter future. The owner waits for its report
+or watchdog, then terminates if response delivery failed. Successful local TCP
+writes do not prove client receipt: an undetected lost reply still requires the
+client to stop, and supervision must discard the trial rather than retry it.
+The owner ends the session after an unusable report, invalid adapter report,
+delivery failure, or sequence exhaustion. Adapter unwinds produce an unknown,
+unusable report; watchdog expiry produces an uncertain deadline report. These
+fallback reports cannot recover partial output held inside the failed adapter.
+
+The shutdown future stops admission and drains accepted work under the configured
+bounds. The caller must await `serve` and supervise target cleanup after its
+terminal result; dropping it can cancel the adapter future and cannot establish
+that execution stopped. Watchdogs require a cooperative async adapter. No target
+lifecycle management, real adapter, broker executable, TLS, or authentication is
+included yet. `tests/broker.rs` exercises real HTTP with fake target sessions;
+this does not demonstrate target isolation.

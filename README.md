@@ -400,7 +400,7 @@ This increment defines the trait, data types, and adapter obligations. Concrete
 adapters and enforcement are still pending. The separate command protocol maps
 these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
-the future broker will translate between HTTP and `TargetSession`.
+`src/broker` translates between HTTP and `TargetSession`.
 
 ## Command protocol
 
@@ -426,7 +426,44 @@ intact and prevents further dispatch. Cancelling a pending request also prevents
 reuse, but cannot stop remote execution. Do not replace the client within the
 same run to reset its sequence state. Fake-broker tests cover these behaviors,
 body limits, malformed replies, redirects, disconnects, and timeouts.
-The real broker and authentication remain pending.
+Authentication remains pending.
+
+## Experiment broker
+
+`src/broker` provides `serve(listener, session, config, shutdown)` for one
+prepared `TargetSession`. The caller supplies the listener, validated byte and
+connection limits, and read/adapter/write timeouts. Hyper handles HTTP/1.1
+framing; the broker bounds body reads, checks the shared protocol, and reserves
+one command at a time. A separate session-owner future holds the adapter so an
+HTTP disconnect cannot cancel accepted execution. Busy requests are rejected,
+without queueing or retrying them.
+
+Only a correlated, bounded report from a ready session permits another command,
+after its response is written locally. Invalid adapter reports, unusable reports,
+and delivery failures end the session. The adapter watchdog produces a
+`MayStillBeRunning` deadline report when it expires. An unwinding adapter produces
+an unknown-completion report. Neither establishes that target execution stopped.
+
+Signal shutdown and await the server to drain accepted work. The caller must
+supervise target cleanup; dropping the server future is not graceful shutdown.
+Successful local writes cannot prove the client received a report. Full bounds,
+HTTP failure behavior, and lifecycle obligations are in
+[COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md).
+
+This increment is a library tested with a fake `TargetSession`; it adds no real
+target adapter or broker executable. The existing connected VM smoke test still
+uses its scripted endpoint. Run the broker tests inside the devcontainer:
+
+```sh
+nix develop --command cargo test --locked --test broker
+```
+
+They exercise the real harness client against the broker, ordered admission,
+malformed and oversized input, chunked bodies, overlapping requests, disconnects,
+graceful shutdown, connection/read limits, adapter watchdogs/unwinds, and invalid
+reports. Pure properties check exact byte bounds, non-mutating rejected appends,
+report correlation, and configuration limits. The next increment is a concrete
+target adapter; its execution and descendant-cleanup policy still need discussion.
 
 ## Run the harness
 

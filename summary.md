@@ -64,11 +64,12 @@ use a physical machine without changing the harness command interface.
 ├── flake.nix / flake.lock
 ├── nixos/{harness-vm.nix,harness-connected-smoke.nix}
 ├── scripts/{run-harness-smoke.sh,run-harness-connected-smoke.sh}
-├── tests/{http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
+├── tests/{broker.rs,http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
 └── src
     ├── lib.rs
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
     ├── command_protocol/{mod.rs,wire.rs,tests.rs}
+    ├── broker/{mod.rs,http.rs,state.rs}
     ├── target/mod.rs
     ├── bin/harness.rs
     └── harness
@@ -272,8 +273,8 @@ body-size checks before parsing, preserving all target outcomes and rejecting
 response sequence mismatches. A pure `SequenceTracker` starts at 1, reserves
 one outstanding command, rejects unexpected requests without advancing, and
 prevents reuse after terminal reports, mismatched reports, or abandonment.
-Sequence exhaustion cannot wrap. HTTP IO/enforcement and broker integration
-are separate. Property tests cover round trips, exact limits, correlation,
+Sequence exhaustion cannot wrap. HTTP IO/enforcement is provided by the broker
+module. Property tests cover round trips, exact limits, correlation,
 sequence transitions, and malformed inputs.
 
 ### Command HTTP client
@@ -415,17 +416,43 @@ retains the build directory on failure. Unchanged successful checks may be cache
 The new check derivation's KVM requirement, image dependency and test flags were
 evaluated. A temporary verification override ran the local fixture instead of
 QEMU and successfully installed its artifacts through the same Nix check recipe.
-The full sandboxed KVM check still requires external execution.
+The user subsequently ran the full sandboxed KVM check on the host and reported
+that it passed. It has not been rerun as part of the broker-library increment.
 The fake wiring is not the future experiment network or an isolation-policy test.
+
+### Experiment broker library
+
+`src/broker` serves the command protocol over HTTP/1.1 using Hyper, with one
+caller-supplied listener and prepared `TargetSession`. Private validated config
+bounds request/response JSON bytes, connection capacity, and read/adapter/write
+timeouts. One connection carries one request. Body limits apply to fixed-length
+and chunked requests; header count/read buffer and total connection time are
+bounded too. A capacity-one admission permit prevents queueing behind execution
+or pending response delivery. The session owner applies `SequenceTracker` and
+executes independently of the connection future; disconnect cannot cancel it.
+
+Ready, correlated reports permit the next sequence after a successful local
+response write. Invalid reports, delivery failure, unusability, or exhaustion
+terminate the server. Adapter watchdog expiry/unwind creates an uncertain,
+unusable report. Shutdown closes admission and drains work; callers must await
+the server and supervise cleanup, since dropping it cannot establish termination.
+Local TCP writes are not acknowledgments of client receipt. No retry or reset.
+
+`tests/broker.rs` connects the real command client and raw TCP requests to the
+real broker with controlled fake adapters. It covers sequencing, malformed and
+oversized requests, concurrency, disconnect, shutdown, deadlines, connection
+capacity, invalid reports, and adapter unwinds. Properties check body accumulation,
+report bounds/correlation, and config validity. No concrete adapter or executable
+is added; the existing connected VM fixture is unchanged. Authentication remains
+explicitly deferred. See README and COMMAND_PROTOCOL.md for the public contract.
 
 ## Not implemented
 
-- Broker integration of the shared protocol.
 - Command protocol authentication (explicitly deferred).
 - Production run-service configuration and host report collection; the existing
   automatic startup and connected VM test are opt-in smoke fixtures only.
 - Run-wide time/message/output limits and incremental structured event export.
-- Experiment broker, concrete target adapters, experiment image, and evidence fixture.
+- Broker executable/deployment, concrete target adapters, experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
 - First end-to-end isolation trial.
@@ -434,13 +461,16 @@ The fake wiring is not the future experiment network or an isolation-policy test
 
 ### Immediate next increment
 
-Run `./scripts/run-harness-connected-smoke.sh` on the KVM host and inspect its
-result. Once that passes, discuss the first concrete broker/target adapter.
-Authentication remains a later increment.
+The user confirmed the sandboxed connected VM smoke test passed. The broker
+library is now implemented against fake target sessions. Discuss the first
+concrete container adapter: how a prepared target is bound to execution policy,
+how commands are invoked, and how deadlines and descendants are handled.
+Authentication remains a later increment. Keep development inside the devcontainer;
+host build/test automation must execute through sandboxed `nix build` derivations.
 
 ### Subsequent increments
 
-1. Implement one experiment broker/target adapter and its negative evidence
+1. Implement one concrete target adapter and its negative evidence
    control, then build the experiment image.
 2. Connect both VM networks, verify the reachability matrix, and perform one
    command round trip.
