@@ -3,6 +3,7 @@
 //! this server: dropping it cannot confirm that remote execution stopped.
 
 mod http;
+pub mod service;
 mod state;
 
 use crate::{command_protocol::SequenceTracker, target::*};

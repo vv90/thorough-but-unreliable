@@ -1,5 +1,42 @@
 # thorough-but-unreliable handoff
 
+## Latest increment (2026-09-20)
+
+The live experiment is now configured by `nixos/experiment-service.nix`, which
+imports the shared `nixos/experiment-vm.nix` foundation. The flake exposes
+`experiment-image`. Target contents, Podman policy, and command settings are in
+`targets/podman/smoke.nix` and selected through `targetEnvironment`.
+
+`experiment-broker --config PATH` is a standalone Rust binary backed by
+`src/broker/service.rs`: bounded strict configuration, validated adapter and
+broker settings, explicit listener binding, signal-driven draining, and terminal
+diagnostics. A separate systemd target service prepares the container and dynamic
+configuration. It stops when the broker exits, removing the container before
+systemd waits on preparation helpers, and checks the recorded cgroup is gone.
+No automatic restart. The VM command NIC uses MAC `52:54:00:99:02:02` and
+`10.99.2.2/30`, with TCP 8080 allowed on command0, no default route or forwarding.
+
+`checks.x86_64-linux.experiment-service` boots the deployed service with an
+isolated NIC and a guest test, checking real execution, deadline response,
+broker exit, and systemd cleanup. `tests/broker_process.rs` covers executable
+SIGTERM handling and terminal-response delivery without Podman. README documents
+the current commands and bounds. This supersedes older statements below that
+broker deployment is unimplemented. The user has also confirmed the older
+real-Podman KVM smoke test passed.
+
+Validation for this increment: the full Rust suite, Clippy, Rust/Nix formatting,
+generated-shell ShellCheck, and Nix package build passed. A local TCG boot of
+the final experiment smoke image passed execution, deadline delivery, successful
+target-unit cleanup, and clean VM poweroff. Logs are in
+`.artifacts/experiment-tcg.78QhGI/console.log`. This caught a conmon-related
+cleanup delay, resolved by the separate target unit, and a test race, resolved
+by awaiting successful unit shutdown before checking container/cgroup absence.
+The committed sandboxed KVM check still needs to run on the user's KVM host.
+
+Next: pair the harness and experiment command NICs in a sandboxed check, then
+add the explicit host Ollama connection. Authentication remains deferred;
+external evidence collection and isolation verdicts are still future work.
+
 ## Project direction
 
 Build a small, reproducible framework for evaluating Nix-defined isolation

@@ -166,9 +166,11 @@ fallback reports cannot recover partial output held inside the failed adapter.
 The shutdown future stops admission and drains accepted work under the configured
 bounds. The caller must await `serve` and supervise target cleanup after its
 terminal result; dropping it can cancel the adapter future and cannot establish
-that execution stopped. Watchdogs require a cooperative async adapter. No target
-lifecycle management, broker executable, TLS, or authentication is
-included yet. `tests/broker.rs` exercises real HTTP with fake target sessions;
+that execution stopped. Watchdogs require a cooperative async adapter. The
+standalone `experiment-broker` executable now hosts this library with a validated
+configuration and SIGTERM/SIGINT draining. `nixos/experiment-service.nix` supplies
+target preparation and systemd cleanup after every service exit. TLS and
+authentication remain unimplemented. `tests/broker.rs` exercises real HTTP with fake target sessions;
 this does not demonstrate target isolation.
 
 `src/target/podman` supplies pure configuration, exec protocol/state logic, bounded
@@ -184,7 +186,9 @@ watchdog also triggers the adapter's cancellation notice.
 including a harness-client/broker/adapter round trip. The separate
 `checks.x86_64-linux.podman-runtime` check exercises that path with actual Podman
 inside a disposable VM and a fixture supervisor that verifies target cleanup.
-The guest check passed under software emulation; sandboxed KVM acceptance remains
-external. Production lifecycle supervision is still unimplemented. Runtime
+The user confirmed that sandboxed KVM check passed. The newer
+`checks.x86_64-linux.experiment-service` checks the standalone executable and
+systemd cleanup through the VM's configured command address. Paired-VM lifecycle
+and physical-host supervision remain unimplemented. Runtime
 status preserves its uncertainty through this protocol, model-facing presentation,
 and the final harness report.

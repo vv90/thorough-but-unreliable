@@ -4,7 +4,9 @@
 let
   name = "localhost/podman-runtime-target";
   tag = "latest";
-  user = "1000:1000";
+  uid = 1000;
+  gid = 1000;
+  user = "${toString uid}:${toString gid}";
 in
 {
   image = pkgs.dockerTools.buildLayeredImage {
@@ -28,6 +30,13 @@ in
     };
   };
   imageReference = "${name}:${tag}";
+  # Settings for each fresh command shell in this target.
+  command = {
+    inherit uid gid;
+    shell = "/bin/bash";
+    workdir = "/work";
+    environment = [ ];
+  };
   # Individual argv entries, escaped by the caller before shell execution.
   runArgs = [
     "--network=none"

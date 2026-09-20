@@ -479,6 +479,112 @@ nix develop --command cargo test --locked --lib target::podman
 nix develop --command cargo test --locked --test podman
 ```
 
+### Experiment VM configuration
+
+[`nixos/experiment-vm.nix`](nixos/experiment-vm.nix) defines the shared NixOS
+experiment VM foundation: a disposable BIOS-booted qcow2 image, serial logs,
+locked logins, and Podman with a root-only Unix socket. Its flake configuration
+is `nixosConfigurations.experiment`. Build it on the host with:
+
+```sh
+nix build --option sandbox true -L .#experiment-image --out-link result-experiment
+```
+
+The image is `result-experiment/experiment.qcow2`.
+[`nixos/experiment-service.nix`](nixos/experiment-service.nix) adds target
+preparation, the standalone broker, and command networking to that foundation.
+On boot, `experiment-target.service` loads the selected container archive,
+creates one restricted target, records its ID and cgroup under `/run/experiment`,
+and writes a mode-0600 broker configuration there. `experiment-broker.service`
+starts after preparation and runs
+`experiment-broker --config /run/experiment/config.json` as root in the VM,
+with access to the root-only Podman socket. The target receives no such access.
+
+The experiment NIC must have MAC `52:54:00:99:02:02`; NixOS names it `command0`
+and assigns `10.99.2.2/30`. The broker listens on `10.99.2.2:8080`, with TCP 8080
+allowed on that interface. The harness peer is `10.99.2.1/30`. There is no
+configured gateway, DNS, DHCP, or IP forwarding. Attach both command NICs to an
+isolated link when pairing VMs; host-side pairing is still a separate increment.
+Without the expected NIC/address, preparation fails after a bounded wait.
+
+Serial logs and `journalctl -u experiment-broker -u experiment-target` show the broker's
+`experiment broker: ready listen=10.99.2.2:8080` message after binding.
+`systemctl stop experiment-broker` sends SIGTERM, allowing accepted work to drain.
+When the broker exits, its target service becomes unneeded and stops. Failed
+preparation also invokes cleanup: remove the target and check that its recorded
+cgroup has disappeared. Cleanup
+failure is a service failure; it does not certify termination. The service does
+not restart automatically. Discard the VM after the trial and boot a fresh one
+for the next trial.
+
+Command deadlines are 30 seconds, with a 35-second broker watchdog and 5-second
+HTTP read/write limits. Each stream retains at most 64 KiB; commands are at most
+4096 bytes. Systemd caps broker runtime at 15 minutes and stop operations at
+60 seconds. These are explicit initial settings in `experiment-service.nix`.
+When connecting a live harness, set its command URL to
+`http://10.99.2.2:8080/v1/command`, request timeout to 60000 ms, and response
+limit to 1048576 bytes so it can receive the broker's bounded reports.
+Authentication remains deferred.
+
+To verify the deployed service on the KVM host:
+
+```sh
+nix build --option sandbox true --keep-failed -L \
+  .#checks.x86_64-linux.experiment-service \
+  --out-link result-experiment-service
+```
+
+This sandboxed check boots the live configuration with an isolated command NIC
+and a guest-side test client. It verifies actual command execution, delivery of
+an uncertain deadline report, broker exit, and systemd removal of the target
+and its cgroup. The deliberate timeout makes the broker unit fail as expected;
+the check passes only after the target unit finishes cleanup successfully.
+It retains logs and the overlay under
+`result-experiment-service/artifacts/`. It does not yet test the link from a
+separate harness VM or Ollama.
+
+[`nixos/podman-runtime-smoke.nix`](nixos/podman-runtime-smoke.nix) imports the same
+foundation and adds the selected target, test execution, cleanup, and automatic
+poweroff. The existing Podman check below continues to exercise that setup.
+
+### Define a target environment
+
+The current Podman target is defined in
+[`targets/podman/smoke.nix`](targets/podman/smoke.nix). It is a Nix function taking
+`pkgs` from the pinned Nixpkgs and returning:
+
+| Field | Purpose |
+| --- | --- |
+| `image` | Container archive built with `dockerTools.buildLayeredImage`: packages, initial files, user, working directory, environment, and initial process. |
+| `imageReference` | Local image name and `latest` tag used after loading the archive. |
+| `runArgs` | List of Podman runtime arguments defining networking, filesystem access, privileges, and resource limits. Each entry is one argument, not a shell fragment. |
+| `command` | Broker execution settings: `uid`, `gid`, absolute `shell` and `workdir`, and `environment` as a list of `[name, value]` pairs. Duplicate names are rejected. |
+
+To define a target:
+
+1. Edit this file, or create another definition under `targets/podman/`. Set the
+   packages and initial files in `image`, then its initial process and environment
+   in `image.config`.
+2. Set the runtime policy in `runArgs`. The current fixture has no network, a
+   read-only root, no capabilities, and a bounded writable `/work` tmpfs.
+3. Select the definition through `targetEnvironment` in the flake's
+   `nixosConfigurations.experiment.specialArgs`. The service smoke configuration
+   selects its target separately in `nixosConfigurations.experiment-smoke`;
+   the older adapter fixture uses `nixosConfigurations.podman-runtime-smoke`.
+   Run the relevant verification command after changes.
+
+[`nixos/podman-runtime-smoke.nix`](nixos/podman-runtime-smoke.nix) consumes this
+definition, loads the archive, and shell-escapes the arguments before starting
+the container. VM setup owns the container name, `--pull=never`, lifecycle,
+cleanup, and observation of its ID and cgroup. Target definitions are trusted
+Nix configuration; their runtime arguments can change isolation policy.
+
+This target is still a compatibility fixture. Its command-adapter settings and
+expected results live in `tests/podman_runtime.rs`; changes to its user, paths,
+or tools may require updating that test. The standalone service consumes the
+target's `command` settings directly. This definition is specific to Podman; future VM or
+physical-machine targets can have their own definitions.
+
 ### Verify the adapter against real Podman
 
 On the KVM host, from the repository root:

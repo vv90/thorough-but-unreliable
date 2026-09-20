@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "listen": "127.0.0.1:18080",
+  "socket_path": "/run/nonexistent-experiment-podman.sock",
+  "container_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "uid": 1000,
+  "gid": 1000,
+  "shell": "/bin/bash",
+  "workdir": "/work",
+  "environment": [],
+  "command_bytes": 4096,
+  "runtime_json_bytes": 65536,
+  "stdout_bytes": 64,
+  "stderr_bytes": 64,
+  "command_timeout_ms": 500,
+  "request_bytes": 32768,
+  "response_bytes": 65536,
+  "connections": 2,
+  "read_timeout_ms": 500,
+  "adapter_timeout_ms": 1000,
+  "write_timeout_ms": 500
+}

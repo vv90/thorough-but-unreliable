@@ -20,6 +20,16 @@ async fn tool(mut command: Command) -> TestResult<Vec<u8>> {
 #[tokio::test]
 #[ignore = "requires KVM and the disposable Podman image; use the Nix podman-runtime check"]
 async fn podman_vm_smoke() -> TestResult {
+    vm_smoke(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires KVM; use the Nix experiment-service check"]
+async fn experiment_vm_smoke() -> TestResult {
+    vm_smoke(true).await
+}
+
+async fn vm_smoke(experiment: bool) -> TestResult {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -39,25 +49,36 @@ async fn podman_vm_smoke() -> TestResult {
         .arg(image)
         .arg(&overlay);
     tool(mkdisk).await?;
-    let mut child = Command::new("qemu-system-x86_64")
-        .args([
-            "-enable-kvm",
-            "-machine",
-            "q35",
-            "-cpu",
-            "host",
-            "-m",
-            "2048",
-            "-display",
-            "none",
-            "-monitor",
-            "none",
-            "-serial",
-            "stdio",
-            "-no-reboot",
-            "-nic",
-            "none",
-        ])
+    let mut qemu = Command::new("qemu-system-x86_64");
+    qemu.args([
+        "-enable-kvm",
+        "-machine",
+        "q35",
+        "-cpu",
+        "host",
+        "-m",
+        "2048",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-nic",
+        "none",
+    ]);
+    if experiment {
+        // A standalone isolated NIC: no user-mode NAT, host forwarding, or
+        // shared directories. The guest test exercises its configured address.
+        qemu.args([
+            "-netdev",
+            "hubport,id=command,hubid=0",
+            "-device",
+            "virtio-net-pci,netdev=command,mac=52:54:00:99:02:02",
+        ]);
+    }
+    let mut child = qemu
         .arg("-drive")
         .arg(format!("file={},format=qcow2,if=virtio", overlay.display()))
         .stdin(Stdio::null())
@@ -105,8 +126,12 @@ async fn podman_vm_smoke() -> TestResult {
         return Err("QEMU failed; see retained logs".into());
     }
     let console = String::from_utf8_lossy(&console);
-    if !console.contains("podman runtime smoke: PASS")
-        || console.contains("podman runtime smoke: FAIL")
+    let marker = if experiment {
+        "experiment service smoke"
+    } else {
+        "podman runtime smoke"
+    };
+    if !console.contains(&format!("{marker}: PASS")) || console.contains(&format!("{marker}: FAIL"))
     {
         return Err("guest did not verify execution and cleanup; see console.log".into());
     }

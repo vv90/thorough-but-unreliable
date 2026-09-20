@@ -123,15 +123,39 @@
         ];
       };
 
+      nixosConfigurations.experiment = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit harnessPackage;
+          targetEnvironment = import ./targets/podman/smoke.nix { inherit pkgs; };
+        };
+        modules = [ ./nixos/experiment-service.nix ];
+      };
+
       nixosConfigurations.podman-runtime-smoke = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs.runtimeTests = podmanRuntimeTests;
+        specialArgs = {
+          runtimeTests = podmanRuntimeTests;
+          targetEnvironment = import ./targets/podman/smoke.nix { inherit pkgs; };
+        };
         modules = [ ./nixos/podman-runtime-smoke.nix ];
+      };
+
+      nixosConfigurations.experiment-smoke = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit harnessPackage;
+          runtimeTests = podmanRuntimeTests;
+          targetEnvironment = import ./targets/podman/smoke.nix { inherit pkgs; };
+        };
+        modules = [ ./nixos/experiment-smoke.nix ];
       };
 
       packages.${system} = {
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
+        experiment-image = self.nixosConfigurations.experiment.config.system.build.image;
+        experiment-smoke-image = self.nixosConfigurations.experiment-smoke.config.system.build.image;
         harness-connected-smoke-image =
           self.nixosConfigurations.harness-connected-smoke.config.system.build.image;
         podman-runtime-smoke-image =
@@ -226,6 +250,16 @@
             cp -a .artifacts/. "$out/artifacts/"
             runHook postInstall
           '';
+        });
+
+        experiment-service = self.checks.${system}.podman-runtime.overrideAttrs (_: {
+          pname = "experiment-service-smoke";
+          PODMAN_SMOKE_IMAGE = "${self.packages.${system}.experiment-smoke-image}/experiment-smoke.qcow2";
+          cargoTestFlags = [
+            "--test"
+            "podman_vm"
+            "experiment_vm_smoke"
+          ];
         });
 
         podman-runtime = harnessPackage.overrideAttrs (old: {

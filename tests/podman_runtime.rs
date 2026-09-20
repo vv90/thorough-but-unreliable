@@ -22,6 +22,109 @@ use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 
 type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult<T = ()> = Result<T, TestError>;
+
+#[tokio::test]
+#[ignore = "runs in the experiment service VM through the Nix experiment-service check"]
+async fn standalone_experiment() -> TestResult {
+    if std::fs::read_to_string("/etc/experiment-smoke")? != "disposable-fixture\n" {
+        return Err("not the disposable experiment fixture".into());
+    }
+    timeout(Duration::from_secs(15), async {
+        loop {
+            if tokio::net::TcpStream::connect("10.99.2.2:8080")
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    let id = std::fs::read_to_string("/run/experiment/container-id")?
+        .trim()
+        .to_owned();
+    let cgroup =
+        std::path::PathBuf::from(std::fs::read_to_string("/run/experiment/cgroup")?.trim());
+    if !cgroup.starts_with("/sys/fs/cgroup") || !cgroup.is_dir() {
+        return Err("missing target cgroup".into());
+    }
+    let mut client = CommandClient::new(CommandConfig {
+        command_url: "http://10.99.2.2:8080/v1/command".into(),
+        connect_timeout: Duration::from_secs(2),
+        request_timeout: Duration::from_secs(45),
+        max_request_bytes: 32768,
+        max_response_bytes: 1048576,
+    })?;
+    completed(
+        execute(
+            &mut client,
+            1,
+            "id -u; id -g; pwd; test ! -e /run/podman/podman.sock",
+        )
+        .await?,
+        0,
+        b"1000\n1000\n/work\n",
+        b"",
+        false,
+    )?;
+    let report = execute(&mut client, 2, "sleep 300 & printf 'waiting\\n'; wait").await?;
+    match report.outcome {
+        ExecutionOutcome::DeadlineExceeded {
+            output,
+            execution_state: ExecutionState::MayStillBeRunning,
+        } if output.stdout.bytes == b"waiting\n"
+            && !output.stdout.truncated
+            && output.stderr == CapturedOutput::default() => {}
+        other => return Err(format!("expected uncertain deadline, got {other:?}").into()),
+    }
+    // Cleanup is performed by the real systemd unit, not this test.
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let status = Command::new("systemctl")
+                .args([
+                    "show",
+                    "experiment-target.service",
+                    "--property=ActiveState",
+                    "--property=Result",
+                ])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if !status.status.success() {
+                return Err("could not inspect target service".into());
+            }
+            let status = std::str::from_utf8(&status.stdout)?;
+            if status.lines().any(|line| line == "ActiveState=failed") {
+                return Err("target service cleanup failed".into());
+            }
+            if status.lines().any(|line| line == "ActiveState=inactive") {
+                if !status.lines().any(|line| line == "Result=success") {
+                    return Err("target service did not stop successfully".into());
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok::<_, TestError>(())
+    })
+    .await??;
+    if cgroup.try_exists()? {
+        return Err("target cgroup still exists after cleanup completed".into());
+    }
+    if podman_status(&["container", "exists", &id]).await?.code() != Some(1) {
+        return Err("target still exists after service cleanup".into());
+    }
+    if tokio::net::TcpStream::connect("10.99.2.2:8080")
+        .await
+        .is_ok()
+    {
+        return Err("broker still listening after terminal session".into());
+    }
+    println!("experiment service: real command, deadline response, and systemd cleanup verified");
+    Ok(())
+}
 const CAPTURE: usize = 64;
 
 fn positive(value: usize) -> TestResult<NonZeroUsize> {

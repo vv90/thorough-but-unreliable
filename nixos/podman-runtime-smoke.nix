@@ -1,64 +1,14 @@
 {
   pkgs,
-  modulesPath,
+  lib,
   runtimeTests,
+  targetEnvironment,
   ...
 }:
-let
-  targetImage = pkgs.dockerTools.buildLayeredImage {
-    name = "localhost/podman-runtime-target";
-    tag = "latest";
-    contents = [
-      pkgs.bash
-      pkgs.coreutils
-    ];
-    extraCommands = ''
-      mkdir -p work tmp
-      chmod 1777 tmp
-    '';
-    config = {
-      User = "1000:1000";
-      WorkingDir = "/work";
-      Env = [ "PATH=/bin" ];
-      Cmd = [
-        "/bin/sleep"
-        "infinity"
-      ];
-    };
-  };
-in
 {
-  imports = [
-    (modulesPath + "/profiles/minimal.nix")
-    (modulesPath + "/profiles/qemu-guest.nix")
-    (modulesPath + "/virtualisation/disk-image.nix")
-  ];
-  image = {
-    baseName = "podman-runtime-smoke";
-    format = "qcow2";
-    efiSupport = false;
-  };
-  virtualisation.diskSize = 8192;
+  imports = [ ./experiment-vm.nix ];
+  image.baseName = "podman-runtime-smoke";
   networking.hostName = "podman-runtime-smoke";
-  networking.useDHCP = false;
-  networking.enableIPv6 = false;
-  services.resolved.enable = false;
-  services.openssh.enable = false;
-  users.mutableUsers = false;
-  users.allowNoPasswordLogin = true;
-  users.users.root.hashedPassword = "!";
-  boot.kernelParams = [ "console=ttyS0,115200n8" ];
-  boot.loader.grub.extraConfig = ''
-    serial --unit=0 --speed=115200
-    terminal_input serial
-    terminal_output serial
-  '';
-  services.journald.settings.Journal = {
-    ForwardToConsole = true;
-    TTYPath = "/dev/ttyS0";
-  };
-  virtualisation.podman.enable = true;
-  systemd.sockets.podman.socketConfig.SocketMode = "0600";
   environment.etc."podman-runtime-smoke".text = "disposable-fixture\n";
 
   # Rootful Podman belongs only to this disposable VM. The test has control of
@@ -100,13 +50,10 @@ in
       }
       trap finish EXIT
       podman --version
-      podman load --input ${targetImage}
+      podman load --input ${targetEnvironment.image}
       podman run --detach --pull=never --name runtime-target \
-        --network=none --read-only --cap-drop=all \
-        --security-opt=no-new-privileges --user=1000:1000 \
-        --pids-limit=64 --memory=128m --memory-swap=128m --cpus=1 \
-        --tmpfs /work:rw,nosuid,nodev,noexec,size=1m,mode=1777 \
-        localhost/podman-runtime-target:latest \
+        ${lib.escapeShellArgs targetEnvironment.runArgs} \
+        ${lib.escapeShellArg targetEnvironment.imageReference} \
         > /run/podman-runtime-smoke/container-id
       container_id=$(cat /run/podman-runtime-smoke/container-id)
       pid=$(podman inspect --format '{{.State.Pid}}' "$container_id")
@@ -148,5 +95,4 @@ in
     '';
     serviceConfig.Type = "oneshot";
   };
-  system.stateVersion = "26.05";
 }
