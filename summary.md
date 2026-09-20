@@ -64,7 +64,7 @@ use a physical machine without changing the harness command interface.
 ├── flake.nix / flake.lock
 ├── nixos/{harness-vm.nix,harness-connected-smoke.nix}
 ├── scripts/{run-harness-smoke.sh,run-harness-connected-smoke.sh}
-├── tests/{broker.rs,http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
+├── tests/{broker.rs,podman.rs,http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
 └── src
     ├── lib.rs
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
@@ -259,8 +259,9 @@ and broker authentication/sequencing remain separate responsibilities.
 
 The interface, data types, and pure readiness derivation are implemented. A
 compiling adapter example and compile-fail examples exercise the public API.
-The Podman adapter's pure core and validated setup types are implemented below;
-concrete IO and lifecycle enforcement remain pending.
+The Podman adapter's pure core, validated setup, and Unix-socket transport are
+implemented below; real-runtime verification and target lifecycle management
+remain pending.
 The existing harness-side `CommandExecutor` is a separate interface.
 
 ### Command protocol
@@ -444,15 +445,16 @@ Local TCP writes are not acknowledgments of client receipt. No retry or reset.
 real broker with controlled fake adapters. It covers sequencing, malformed and
 oversized requests, concurrency, disconnect, shutdown, deadlines, connection
 capacity, invalid reports, and adapter unwinds. Properties check body accumulation,
-report bounds/correlation, and config validity. No concrete adapter or executable
-is added; the existing connected VM fixture is unchanged. Authentication remains
+report bounds/correlation, and config validity. The Podman integration also uses
+the broker with its real adapter against fake runtime endpoints. There is no
+broker executable yet; the existing connected VM fixture is unchanged. Authentication remains
 explicitly deferred. See README and COMMAND_PROTOCOL.md for the public contract.
 
 ### Podman adapter pure core
 
 `src/target/podman/{config,session,wire,stream}.rs` implements validated setup,
 bounded request/response codecs, an incremental non-TTY stream decoder, and a
-pure session core. It has no IO or `TargetSession` implementation yet. Settings
+pure session core. `transport.rs` implements IO separately as described below. Settings
 bind a full container ID, local Unix socket, numeric user/group, absolute shell
 and directory, explicit environment overrides, and command/JSON/output/deadline
 limits. Environment overrides supplement the prepared container's base.
@@ -468,9 +470,9 @@ partial output on failure without allocating from advertised frame lengths.
 
 The approved policy allows background descendants within a trial. Descendants
 holding output streams open remain subject to the command deadline. Uncertain
-execution ends the session and requires external trial teardown. The future IO
-layer must enforce these timers, bound HTTP reads, validate upgrades, and notify
-supervision after cancellation/failure. The pure core only consumes observations.
+execution ends the session and requires external trial teardown. The IO layer
+enforces timers and HTTP bounds, validates upgrades, and notifies supervision
+after cancellation/failure. The pure core only consumes observations.
 
 `ProcessCompletion::RuntimeStatus` and wire kind `runtime_status` preserve numeric
 runtime codes without inventing exit-versus-signal information. Codes remain u8;
@@ -480,13 +482,40 @@ together. Fifteen focused tests include properties for exact command preservatio
 chunk-independent bounded capture, cancellation/failure permanence, report
 correlation, status fidelity, exact JSON bounds, and validated container selectors.
 
+### Podman Unix-socket transport
+
+`PodmanTargetSession` implements `TargetSession` over a caller-prepared binding
+and a required Tokio oneshot supervision sender. It uses Hyper HTTP/1.1 over
+UnixStream, one connection per request, with no detached connection tasks,
+proxies, redirects, fallback endpoints, or automatic retries. A single deadline
+covers all stages, including 25 ms pending-inspection delays and final decoding.
+The broker watchdog must leave time for the adapter to report its own deadline.
+HTTP parsing has 32-header/16 KiB buffer bounds; JSON bodies are bounded while
+reading, including chunked/EOF bodies. Upgrade headers are validated and already
+buffered raw stream bytes are retained. IO failures preserve captured output;
+uncertain execution remains unusable. Dependency unwinds become explicit errors.
+
+The supervisor receives one terminal event: SessionUnusable on a terminal report,
+ExecutionCancelled if a polled execution future is dropped, or SessionDropped on
+adapter disposal without an earlier event. No remote process termination is
+claimed. A closed receiver prevents new commands. The caller must retain the
+receiver and arrange cleanup on an event or unexpected channel closure. No target
+lifecycle controller is added here.
+
+Nine real Unix-socket tests in `tests/podman.rs` check ordered exchanges and no
+retries, bounds, upgrades and prefetched frames, partial output, shared deadlines,
+cancellation at every stage, supervision, and the full harness-client → broker →
+adapter path. They use fake runtime endpoints, never actual Podman. A property
+checks bounded JSON accumulation and unchanged buffers on rejection; fault
+injection checks dependency unwinds and that expired operations are not polled.
+
 ## Not implemented
 
 - Command protocol authentication (explicitly deferred).
 - Production run-service configuration and host report collection; the existing
   automatic startup and connected VM test are opt-in smoke fixtures only.
 - Run-wide time/message/output limits and incremental structured event export.
-- Broker executable/deployment, Podman socket transport and runtime verification,
+- Broker executable/deployment and Podman runtime verification,
   experiment image, and evidence fixture.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
@@ -497,18 +526,17 @@ correlation, status fidelity, exact JSON bounds, and validated container selecto
 ### Immediate next increment
 
 The user confirmed the sandboxed connected VM smoke test passed. The broker
-library is implemented against fake target sessions, and the Podman adapter's pure
-core is now implemented. The next increment is the thin Unix-socket transport
-implementing `TargetSession`, initially tested with fake runtime endpoints. Then
-verify it against actual Podman inside a disposable experiment VM; host automation
+library and complete Podman adapter are tested against fake runtime endpoints.
+The next increment is to verify the adapter against actual Podman inside a
+disposable experiment VM; host automation
 must remain a sandboxed Nix derivation.
 Authentication remains a later increment. Keep development inside the devcontainer;
 host build/test automation must execute through sandboxed `nix build` derivations.
 
 ### Subsequent increments
 
-1. Implement one concrete target adapter and its negative evidence
-   control, then build the experiment image.
+1. Verify the Podman adapter, add the negative evidence control and broker
+   deployment, then build the experiment image.
 2. Connect both VM networks, verify the reachability matrix, and perform one
    command round trip.
 3. Test real Ollama, add the minimum host controller/verifier, and run the first

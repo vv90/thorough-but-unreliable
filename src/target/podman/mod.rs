@@ -1,15 +1,16 @@
-//! Pure Podman exec core. No socket, runtime, clock, or container operations.
-//! The future transport must enforce deadlines and bounded HTTP reads, validate
-//! upgrades, and notify supervision whenever an attempt is lost or unusable.
+//! Podman exec adapter with a pure core and a Unix-socket transport. Trusted
+//! setup prepares the container; external supervision owns target teardown.
 //! Uses the unversioned Docker-compatible exec endpoints supported by Podman.
 
 mod config;
 mod session;
 mod stream;
+mod transport;
 mod wire;
 
 pub use config::{Config, Limits, Settings};
 pub use session::{Capture, Create, Failure, Inspect, Inspection, Session, Start};
+pub use transport::{PodmanTargetSession, SupervisionEvent};
 
 use std::{
     fmt,

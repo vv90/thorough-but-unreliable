@@ -167,12 +167,21 @@ The shutdown future stops admission and drains accepted work under the configure
 bounds. The caller must await `serve` and supervise target cleanup after its
 terminal result; dropping it can cancel the adapter future and cannot establish
 that execution stopped. Watchdogs require a cooperative async adapter. No target
-lifecycle management, real adapter, broker executable, TLS, or authentication is
+lifecycle management, broker executable, TLS, or authentication is
 included yet. `tests/broker.rs` exercises real HTTP with fake target sessions;
 this does not demonstrate target isolation.
 
-`src/target/podman` now supplies pure configuration, exec protocol/state logic,
-and bounded stream decoding for the first adapter. Its session is not yet a
-`TargetSession` implementation: Unix-socket IO, timers and supervision wiring
-remain pending. Runtime status preserves its uncertainty through this protocol,
-model-facing presentation, and the final harness report.
+`src/target/podman` supplies pure configuration, exec protocol/state logic, bounded
+stream decoding, and `PodmanTargetSession`, a Unix-socket `TargetSession` adapter.
+The adapter uses a single command deadline and retains captured output when its
+IO fails. It never retries create/start operations. Terminal failures, cancellation,
+and adapter disposal notify external supervision through a required oneshot sender;
+these notices request trial cleanup and never confirm execution stopped. The
+broker watchdog should exceed the adapter deadline. Cancelling through that
+watchdog also triggers the adapter's cancellation notice.
+
+`tests/podman.rs` checks real Unix-socket exchanges against fake runtime endpoints,
+including a harness-client/broker/adapter round trip. Actual Podman interoperability
+and lifecycle supervision remain unverified/unimplemented respectively. Runtime
+status preserves its uncertainty through this protocol, model-facing presentation,
+and the final harness report.

@@ -5,12 +5,14 @@ use super::{
 };
 use crate::target::*;
 
-/// External effect failure, supplied by the future transport. Once start could
+/// External effect failure, supplied by the transport. Once start could
 /// have been dispatched, no failure can assert that the command never ran.
+#[derive(Debug)]
 pub enum Failure {
     Transport,
     Deadline,
     DependencyPanicked,
+    Response(Error),
 }
 
 /// Pure owner of one binding. No Clone/reset; replacing it cannot resume a run.
@@ -31,6 +33,9 @@ impl Session {
     }
     pub fn state(&self) -> SessionState {
         self.state
+    }
+    pub(super) fn invalidate(&mut self) {
+        self.state = SessionState::Unusable;
     }
 
     /// Reservation survives cancellation, including forgetting an unfinished
@@ -140,6 +145,10 @@ impl Attempt<'_> {
                     diagnostic: None,
                 },
             },
+            Failure::Response(error) => ExecutionOutcome::Unknown {
+                output,
+                error: classify(error),
+            },
         };
         ExecutionReport {
             sequence: self.sequence,
@@ -182,6 +191,7 @@ impl<'a> Create<'a> {
         let kind = match failure {
             Failure::Transport | Failure::Deadline => ExecutionErrorKind::Transport,
             Failure::DependencyPanicked => ExecutionErrorKind::DependencyPanicked,
+            Failure::Response(error) => return self.attempt.not_started(error),
         };
         ExecutionReport {
             sequence: self.attempt.sequence,

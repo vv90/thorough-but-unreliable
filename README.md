@@ -398,14 +398,13 @@ subsequent requests must be rejected without dispatch. Dropping an execution
 future requires discarding the session and notifying supervision. If termination
 cannot be confirmed at a deadline, supervision must end the trial.
 
-The trait, data types, and adapter obligations are implemented. The first
-adapter's pure core is described below; actual execution and enforcement remain
-pending. The separate command protocol maps
-these internal types to its wire schema.
+The trait, data types, and Podman adapter are implemented. Real-runtime
+verification and target lifecycle management remain pending. The separate
+command protocol maps these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 `src/broker` translates between HTTP and `TargetSession`.
 
-### Podman adapter core
+### Podman adapter
 
 `src/target/podman` contains pure logic for one prepared container. `Config::new`
 validates trusted `Settings`: an absolute Linux Unix socket path, a full 64-digit
@@ -443,14 +442,45 @@ deadline. Readiness is permission to continue, not evidence that descendants
 have stopped or that isolation held. A failure after start may have been sent is
 uncertain; a deadline then reports `MayStillBeRunning` and requires trial teardown.
 
-This is a pure core, not yet a `TargetSession` implementation. The next increment
-is Unix-socket transport with bounded HTTP reads, upgrade validation, one total
-deadline covering all stages, and supervision notification. No container runs in
-these tests. Run them inside the devcontainer:
+`PodmanTargetSession::new(config, supervisor)` wraps this core and implements
+`TargetSession`. The supervisor argument is a Tokio oneshot sender carrying
+`SupervisionEvent`. Construction performs no IO. Execution connects only to the
+configured Unix socket, with no network fallback, environment proxies, redirects,
+or retries. Each create/start/inspect request owns a fresh HTTP/1.1 connection.
+Connection drivers are polled alongside their requests; no tasks are detached.
+
+One deadline covers connection setup, request/response IO, output draining,
+inspection polling, and final decoding. Pending inspections wait 25 ms between
+reads under that same deadline. The broker watchdog must be longer than the
+adapter deadline to let the adapter return its partial output and terminal report.
+JSON body reads use the configured byte limit for fixed-length, chunked, and
+EOF-delimited responses. Header parsing has a 32-header/16 KiB buffer bound.
+Responses require unencoded HTTP/1.1 JSON or a validated `101` TCP upgrade.
+Any output bytes already read with the upgrade headers are preserved.
+
+Keep the supervision receiver alive throughout the trial. A terminal report
+sends `SessionUnusable`; dropping a polled, unfinished execution sends
+`ExecutionCancelled`. Disposing of the adapter without an earlier notice sends
+`SessionDropped`. Only one terminal notice is sent. Closing the receiver prevents
+new commands. The supervisor must handle notices or unexpected channel closure
+by arranging trial cleanup. These notifications and socket closure do not prove
+that the command or its descendants stopped; no target teardown is implemented
+by the adapter itself.
+
+`tests/podman.rs` uses real Unix sockets with scripted runtime endpoints. It covers
+HTTP/upgrade failures, response bounds, partial output, one shared deadline,
+cancellation at every IO stage, session reuse rules, and supervision notices.
+It also connects the existing harness client through the broker and actual adapter
+to the fake runtime. No Podman daemon or target command runs in these tests.
+Run them inside the devcontainer:
 
 ```sh
 nix develop --command cargo test --locked --lib target::podman
+nix develop --command cargo test --locked --test podman
 ```
+
+The next increment is verification against real Podman inside a disposable
+experiment VM, with host-side automation running through sandboxed `nix build`.
 
 ## Command protocol
 
@@ -500,9 +530,10 @@ Successful local writes cannot prove the client received a report. Full bounds,
 HTTP failure behavior, and lifecycle obligations are in
 [COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md).
 
-This increment is a library tested with a fake `TargetSession`; it adds no real
-target adapter or broker executable. The existing connected VM smoke test still
-uses its scripted endpoint. Run the broker tests inside the devcontainer:
+The broker is a library, without a standalone executable yet. Its own tests use
+fake `TargetSession` implementations; `tests/podman.rs` also exercises it with
+the Podman adapter above. The existing connected VM smoke test still uses its
+scripted endpoint. Run the broker tests inside the devcontainer:
 
 ```sh
 nix develop --command cargo test --locked --test broker
@@ -513,7 +544,7 @@ malformed and oversized input, chunked bodies, overlapping requests, disconnects
 graceful shutdown, connection/read limits, adapter watchdogs/unwinds, and invalid
 reports. Pure properties check exact byte bounds, non-mutating rejected appends,
 report correlation, and configuration limits. The Podman adapter core above is
-the next layer; its socket transport and real-runtime verification remain pending.
+the next layer; real-runtime verification remains pending.
 
 ## Run the harness
 
