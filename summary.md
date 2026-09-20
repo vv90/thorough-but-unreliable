@@ -62,9 +62,9 @@ use a physical machine without changing the harness command interface.
 ├── Cargo.toml / Cargo.lock
 ├── IMPLEMENTATION.md
 ├── flake.nix / flake.lock
-├── nixos/{harness-vm.nix,harness-connected-smoke.nix}
+├── nixos/{harness-vm.nix,harness-connected-smoke.nix,podman-runtime-smoke.nix}
 ├── scripts/{run-harness-smoke.sh,run-harness-connected-smoke.sh}
-├── tests/{broker.rs,podman.rs,http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
+├── tests/{broker.rs,podman.rs,podman_runtime.rs,podman_vm.rs,http_loop.rs,cli_run.rs,connected_vm.rs,support/mod.rs,fixtures/}
 └── src
     ├── lib.rs
     ├── manifest.rs / manifest/{wire.rs,tests.rs}
@@ -260,8 +260,8 @@ and broker authentication/sequencing remain separate responsibilities.
 The interface, data types, and pure readiness derivation are implemented. A
 compiling adapter example and compile-fail examples exercise the public API.
 The Podman adapter's pure core, validated setup, and Unix-socket transport are
-implemented below; real-runtime verification and target lifecycle management
-remain pending.
+implemented below, along with a real-runtime VM check. Production target lifecycle
+management remains pending.
 The existing harness-side `CommandExecutor` is a separate interface.
 
 ### Command protocol
@@ -509,14 +509,51 @@ adapter path. They use fake runtime endpoints, never actual Podman. A property
 checks bounded JSON accumulation and unchanged buffers on rejection; fault
 injection checks dependency unwinds and that expired operations are not polled.
 
+### Real Podman VM check
+
+`checks.x86_64-linux.podman-runtime` builds a standalone disposable experiment
+image and runs it through a Rust KVM runner in the Nix build sandbox. README has
+the authoritative command. No host Podman, development shell, network changes,
+or shared directories are used. The VM has no NICs; a baked-in Nix container
+archive supplies Bash and coreutils without pulls. Rootful Podman stays inside
+the VM; the target runs as UID/GID 1000 with no socket mounts, no network, dropped
+capabilities, no-new-privileges, read-only root and bounded resources.
+
+`tests/podman_runtime.rs` is compiled as an opt-in test executable installed in
+the guest image. It connects the real command client through a loopback broker
+and adapter to Podman's Unix socket. Commands check identity/environment/workdir,
+EOF stdin, binary output, nonzero runtime status, fresh shells with persistent
+files, output truncation, and reuse. The last command leaves a child waiting:
+the adapter must report an uncertain deadline with partial output. A fixture
+supervisor consumes the terminal notice, removes the target, verifies absence
+of container metadata and the target cgroup, and checks the broker's terminal
+reason. A shell exit trap handles early failures; shutdown and the outer runner's
+deadline provide fallback containment. This is test supervision, not a production
+lifecycle controller.
+
+`tests/podman_vm.rs` bounds QEMU runtime and log capture, kills/reaps on failure,
+and checks the guest PASS marker and clean exit. Logs and the writable overlay
+are installed in the check output. Both tests are ignored in ordinary Cargo
+runs. Validation completed: full Cargo suite, Clippy, Rust/Nix formatting,
+ShellCheck on the generated setup script, and the Nix harness package build.
+There is no KVM device in the development workspace. A temporary local derivation
+override allowed image assembly using Nixpkgs' QEMU TCG fallback, without changing
+the committed KVM requirement. The resulting image booted under TCG and passed
+all six command checks, supervision/cgroup cleanup and clean poweroff. That run
+caught and fixed Podman's rejection of uid/gid tmpfs mount options; the fixture
+uses mode 1777 for its isolated writable /work instead. Logs are in
+`.artifacts/podman-tcg.DlHNZm/console.log`. The committed sandboxed KVM runner still
+requires external acceptance. This fixture is not an isolation verdict or an
+Ollama trial.
+
 ## Not implemented
 
 - Command protocol authentication (explicitly deferred).
 - Production run-service configuration and host report collection; the existing
   automatic startup and connected VM test are opt-in smoke fixtures only.
 - Run-wide time/message/output limits and incremental structured event export.
-- Broker executable/deployment and Podman runtime verification,
-  experiment image, and evidence fixture.
+- Broker executable/deployment, production experiment image, and evidence fixture.
+- External KVM acceptance of the new real-Podman check.
 - Physical-host controller, paired VM lifecycle, collection, and verifier.
 - Connected inference/command networks and real Ollama interoperability.
 - First end-to-end isolation trial.
@@ -526,10 +563,12 @@ injection checks dependency unwinds and that expired operations are not polled.
 ### Immediate next increment
 
 The user confirmed the sandboxed connected VM smoke test passed. The broker
-library and complete Podman adapter are tested against fake runtime endpoints.
-The next increment is to verify the adapter against actual Podman inside a
-disposable experiment VM; host automation
-must remain a sandboxed Nix derivation.
+library and complete Podman adapter are tested against fake runtime endpoints
+and real Podman inside the disposable VM under TCG.
+The real-Podman disposable VM check is now implemented. Run its sandboxed Nix
+check on the KVM builder and resolve any runtime compatibility failures before
+expanding the deployment. Then add the evidence control and broker deployment
+as separately discussed increments.
 Authentication remains a later increment. Keep development inside the devcontainer;
 host build/test automation must execute through sandboxed `nix build` derivations.
 

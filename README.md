@@ -398,8 +398,8 @@ subsequent requests must be rejected without dispatch. Dropping an execution
 future requires discarding the session and notifying supervision. If termination
 cannot be confirmed at a deadline, supervision must end the trial.
 
-The trait, data types, and Podman adapter are implemented. Real-runtime
-verification and target lifecycle management remain pending. The separate
+The trait, data types, and Podman adapter are implemented, with a real-runtime
+VM check described below. Production target lifecycle management remains pending. The separate
 command protocol maps these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 `src/broker` translates between HTTP and `TargetSession`.
@@ -479,8 +479,63 @@ nix develop --command cargo test --locked --lib target::podman
 nix develop --command cargo test --locked --test podman
 ```
 
-The next increment is verification against real Podman inside a disposable
-experiment VM, with host-side automation running through sandboxed `nix build`.
+### Verify the adapter against real Podman
+
+On the KVM host, from the repository root:
+
+```sh
+nix build --option sandbox true --keep-failed -L \
+  .#checks.x86_64-linux.podman-runtime \
+  --out-link result-podman-runtime
+```
+
+The builder must have Nix sandboxing enabled and advertise the `kvm` system
+feature. No host development shell, Podman socket, or Cargo invocation is needed.
+The check builds a separate disposable VM image and a small container image from
+pinned Nixpkgs. It boots with no network interfaces or shared host directories;
+the container archive and Rust test executable are already in the VM image.
+The ordinary harness images and connected smoke check are unchanged.
+
+Inside the VM, trusted setup loads the archive without a registry pull and starts
+one container with UID/GID 1000, no network, a read-only root filesystem, no Linux
+capabilities, no privilege escalation, and bounded memory, CPU and processes.
+`/work` is a writable, size-limited tmpfs. Rootful Podman and its root-only Unix
+socket stay in the experiment VM; the target never receives the socket or a
+mount of the VM's directories. This is a runtime compatibility fixture, not yet
+the chosen production target policy. See Podman's [run options](https://docs.podman.io/en/latest/markdown/podman-run.1.html).
+
+`tests/podman_runtime.rs` runs this path entirely inside the VM:
+
+```text
+command client → loopback HTTP broker → Unix-socket adapter → Podman → container
+```
+
+It requires the configured identity, working directory and environment; EOF
+stdin; separate binary stdout/stderr; nonzero completion status; filesystem
+persistence with fresh shell state; bounded output with truncation; and successful
+reuse after earlier commands. Its last command starts a child and waits past the
+five-second adapter deadline. The report must retain partial output and declare
+`MayStillBeRunning`. The supervisor must receive the correlated terminal notice,
+remove the container, and verify both container absence and disappearance of the
+target's cgroup, observed from the VM's procfs. The broker must terminate the
+unusable session. Cleanup also runs on test failure; VM shutdown is the final
+fallback. The adapter itself still does not manage target lifecycle.
+
+The guest prints `podman runtime smoke: PASS` only after assertions and cleanup
+succeed, then powers off. `tests/podman_vm.rs` requires that marker, no FAIL
+marker, and a successful QEMU exit. It bounds the run to 300 seconds and kills
+and reaps a stalled VM. Successful builds retain `console.log`, `stderr.log`
+and the writable overlay under `result-podman-runtime/artifacts/`; failed builds
+retain their directory via `--keep-failed`. Nix may reuse an existing successful
+result for unchanged inputs.
+
+Both new tests are ignored by ordinary `cargo test`: it compiles them but does
+not establish real-runtime success. Run the explicit KVM check above. This
+workspace has no KVM device. The image was built and the guest assertions passed
+under QEMU software emulation (TCG), including verified cleanup and clean VM exit.
+The committed sandboxed KVM runner still requires external verification.
+The check does not exercise a model, the harness VM, a production broker service,
+paired VM networking, or an isolation evidence verifier.
 
 ## Command protocol
 
@@ -543,8 +598,8 @@ They exercise the real harness client against the broker, ordered admission,
 malformed and oversized input, chunked bodies, overlapping requests, disconnects,
 graceful shutdown, connection/read limits, adapter watchdogs/unwinds, and invalid
 reports. Pure properties check exact byte bounds, non-mutating rejected appends,
-report correlation, and configuration limits. The Podman adapter core above is
-the next layer; real-runtime verification remains pending.
+report correlation, and configuration limits. The separate Podman VM check above
+exercises the same broker with its adapter and an actual container runtime.
 
 ## Run the harness
 

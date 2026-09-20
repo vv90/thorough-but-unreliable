@@ -181,7 +181,10 @@ broker watchdog should exceed the adapter deadline. Cancelling through that
 watchdog also triggers the adapter's cancellation notice.
 
 `tests/podman.rs` checks real Unix-socket exchanges against fake runtime endpoints,
-including a harness-client/broker/adapter round trip. Actual Podman interoperability
-and lifecycle supervision remain unverified/unimplemented respectively. Runtime
+including a harness-client/broker/adapter round trip. The separate
+`checks.x86_64-linux.podman-runtime` check exercises that path with actual Podman
+inside a disposable VM and a fixture supervisor that verifies target cleanup.
+The guest check passed under software emulation; sandboxed KVM acceptance remains
+external. Production lifecycle supervision is still unimplemented. Runtime
 status preserves its uncertainty through this protocol, model-facing presentation,
 and the final harness report.

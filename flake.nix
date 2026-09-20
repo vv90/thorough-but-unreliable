@@ -27,6 +27,27 @@
         meta.mainProgram = "harness";
       };
 
+      # Compile an opt-in integration-test executable for use inside the VM.
+      # No Podman commands execute in this derivation or on the physical host.
+      podmanRuntimeTests = harnessPackage.overrideAttrs (old: {
+        pname = "podman-runtime-tests";
+        doCheck = false;
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.jq ];
+        buildPhase = ''
+          runHook preBuild
+          cargo test --release --locked --offline --test podman_runtime \
+            --no-run --message-format=json > test-build.json
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          executable=$(jq -ers '[.[] | select(.reason == "compiler-artifact" and .target.name == "podman_runtime" and .executable != null)] | if length == 1 then .[0].executable else error("expected one test executable") end' test-build.json)
+          install -Dm755 "$executable" "$out/bin/podman-runtime-test"
+          runHook postInstall
+        '';
+        meta.mainProgram = "podman-runtime-test";
+      });
+
       # Private single-user Nix; no host store or daemon connection.
       developmentTools = with pkgs; [
         nix
@@ -102,11 +123,19 @@
         ];
       };
 
+      nixosConfigurations.podman-runtime-smoke = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs.runtimeTests = podmanRuntimeTests;
+        modules = [ ./nixos/podman-runtime-smoke.nix ];
+      };
+
       packages.${system} = {
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
         harness-connected-smoke-image =
           self.nixosConfigurations.harness-connected-smoke.config.system.build.image;
+        podman-runtime-smoke-image =
+          self.nixosConfigurations.podman-runtime-smoke.config.system.build.image;
 
         devImage = pkgs.dockerTools.buildLayeredImage {
           name = "localhost/thorough-but-unreliable-dev";
@@ -165,38 +194,67 @@
 
       };
 
-      checks.${system}.harness-connected-smoke = harnessPackage.overrideAttrs (old: {
-        pname = "harness-connected-smoke";
-        requiredSystemFeatures = [ "kvm" ];
-        preferLocalBuild = true;
-        allowSubstitutes = false;
-        nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [
-          pkgs.qemu_kvm
-          pkgs.xorriso
-          pkgs.netcat-openbsd
-        ];
-        HARNESS_SMOKE_IMAGE = "${
-          self.packages.${system}.harness-connected-smoke-image
-        }/harness-connected-smoke.qcow2";
-        cargoTestFlags = [
-          "--test"
-          "connected_vm"
-          "connected_vm_smoke"
-        ];
-        checkFlags = [
-          "--ignored"
-          "--exact"
-          "--nocapture"
-        ];
-        # Run the Rust test and all its child processes inside the builder.
-        # Successful builds publish the logs, ISO, and writable overlay.
-        installPhase = ''
-          runHook preInstall
-          mkdir -p "$out/artifacts"
-          cp -a .artifacts/. "$out/artifacts/"
-          runHook postInstall
-        '';
-      });
+      checks.${system} = {
+        harness-connected-smoke = harnessPackage.overrideAttrs (old: {
+          pname = "harness-connected-smoke";
+          requiredSystemFeatures = [ "kvm" ];
+          preferLocalBuild = true;
+          allowSubstitutes = false;
+          nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [
+            pkgs.qemu_kvm
+            pkgs.xorriso
+            pkgs.netcat-openbsd
+          ];
+          HARNESS_SMOKE_IMAGE = "${
+            self.packages.${system}.harness-connected-smoke-image
+          }/harness-connected-smoke.qcow2";
+          cargoTestFlags = [
+            "--test"
+            "connected_vm"
+            "connected_vm_smoke"
+          ];
+          checkFlags = [
+            "--ignored"
+            "--exact"
+            "--nocapture"
+          ];
+          # Run the Rust test and all its child processes inside the builder.
+          # Successful builds publish the logs, ISO, and writable overlay.
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out/artifacts"
+            cp -a .artifacts/. "$out/artifacts/"
+            runHook postInstall
+          '';
+        });
+
+        podman-runtime = harnessPackage.overrideAttrs (old: {
+          pname = "podman-runtime-smoke";
+          requiredSystemFeatures = [ "kvm" ];
+          preferLocalBuild = true;
+          allowSubstitutes = false;
+          nativeCheckInputs = (old.nativeCheckInputs or [ ]) ++ [ pkgs.qemu_kvm ];
+          PODMAN_SMOKE_IMAGE = "${
+            self.packages.${system}.podman-runtime-smoke-image
+          }/podman-runtime-smoke.qcow2";
+          cargoTestFlags = [
+            "--test"
+            "podman_vm"
+            "podman_vm_smoke"
+          ];
+          checkFlags = [
+            "--ignored"
+            "--exact"
+            "--nocapture"
+          ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out/artifacts"
+            cp -a .artifacts/. "$out/artifacts/"
+            runHook postInstall
+          '';
+        });
+      };
 
       devShells.${system}.default = pkgs.mkShell {
         packages = developmentTools;
