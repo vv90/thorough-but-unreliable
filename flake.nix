@@ -116,7 +116,11 @@
 
       nixosConfigurations.harness-connected-smoke = nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs = { inherit harnessPackage; };
+        specialArgs = {
+          inherit harnessPackage;
+          connectedExpectedReport = ./tests/fixtures/connected-report.json;
+          connectedImageName = "harness-connected-smoke";
+        };
         modules = [
           ./nixos/harness-vm.nix
           ./nixos/harness-connected-smoke.nix
@@ -130,6 +134,19 @@
           targetEnvironment = import ./targets/podman/smoke.nix { inherit pkgs; };
         };
         modules = [ ./nixos/experiment-service.nix ];
+      };
+
+      nixosConfigurations.harness-paired-smoke = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = {
+          inherit harnessPackage;
+          connectedExpectedReport = ./tests/fixtures/paired-report.json;
+          connectedImageName = "harness-paired-smoke";
+        };
+        modules = [
+          ./nixos/harness-vm.nix
+          ./nixos/harness-connected-smoke.nix
+        ];
       };
 
       nixosConfigurations.podman-runtime-smoke = nixpkgs.lib.nixosSystem {
@@ -155,6 +172,8 @@
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
         experiment-image = self.nixosConfigurations.experiment.config.system.build.image;
+        harness-paired-smoke-image =
+          self.nixosConfigurations.harness-paired-smoke.config.system.build.image;
         experiment-smoke-image = self.nixosConfigurations.experiment-smoke.config.system.build.image;
         harness-connected-smoke-image =
           self.nixosConfigurations.harness-connected-smoke.config.system.build.image;
@@ -219,6 +238,19 @@
       };
 
       checks.${system} = {
+        paired-vm = self.checks.${system}.harness-connected-smoke.overrideAttrs (_: {
+          pname = "paired-vm-smoke";
+          HARNESS_SMOKE_IMAGE = "${
+            self.packages.${system}.harness-paired-smoke-image
+          }/harness-paired-smoke.qcow2";
+          EXPERIMENT_IMAGE = "${self.packages.${system}.experiment-image}/experiment.qcow2";
+          cargoTestFlags = [
+            "--test"
+            "connected_vm"
+            "paired::paired_vm_smoke"
+          ];
+        });
+
         harness-connected-smoke = harnessPackage.overrideAttrs (old: {
           pname = "harness-connected-smoke";
           requiredSystemFeatures = [ "kvm" ];

@@ -1,5 +1,37 @@
 # thorough-but-unreliable handoff
 
+## Paired VM increment (2026-09-20)
+
+`checks.x86_64-linux.paired-vm` now boots the live experiment image and an opt-in
+`harness-paired-smoke-image` inside the build sandbox. The command NICs share a
+private QEMU Unix stream (Ethernet); there is no command proxy on the host.
+Only inference is fake, reached through the existing restricted guestfwd design.
+The runner waits for broker readiness before booting the harness, checks the
+exact returned tool report before model submission, and the harness checks the
+full report and its ownership/mode before powering off. ACPI shutdown of the
+experiment must produce successful broker/target service shutdown and explicit
+target/cgroup cleanup records.
+
+Implementation: `tests/connected_vm/paired.rs`, paired manifest/report fixtures,
+and parameterized `nixos/harness-connected-smoke.nix`. The existing connected
+check retains its original fixtures. Both QEMU processes have bounded output and
+timeouts, with logs and fresh overlays retained. README is the command source of
+truth. The committed host check requires KVM and sandboxed `nix build`.
+
+Validation: the full Rust suite, Clippy, Rust/Nix formatting, both image builds,
+and original/paired Nix configuration evaluation passed. The paired test passed
+locally under TCG using a temporary copy of the runner with only its KVM guard
+and accelerator selection changed. Artifacts are in `.artifacts/paired-tcg.3jck4y/`.
+The test requires successful systemd unit shutdown and explicit cleanup records;
+it does not depend on the broker process's diagnostic reaching the poweroff
+console. No KVM device is available in this devcontainer, so the committed
+host KVM check still needs to be run by the user.
+
+Next: explicitly connect the harness inference endpoint to the host's Ollama
+server and select a tool-capable model. No real model has been contacted.
+Authentication, general trial supervision, evidence collection, and isolation
+verdicts remain deferred. This section supersedes the pairing next-step note below.
+
 ## Latest increment (2026-09-20)
 
 The live experiment is now configured by `nixos/experiment-service.nix`, which

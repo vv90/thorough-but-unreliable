@@ -2,15 +2,17 @@
   harnessPackage,
   lib,
   pkgs,
+  connectedExpectedReport,
+  connectedImageName,
   ...
 }:
 
 let
-  expectedReport = ../tests/fixtures/connected-report.json;
+  expectedReport = connectedExpectedReport;
 in
 {
   # Opt-in test image only. The base image never launches a trial at boot.
-  image.baseName = lib.mkForce "harness-connected-smoke";
+  image.baseName = lib.mkForce connectedImageName;
 
   systemd.services.harness-run = {
     description = "Run the connected harness smoke trial";

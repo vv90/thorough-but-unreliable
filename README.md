@@ -504,7 +504,7 @@ The experiment NIC must have MAC `52:54:00:99:02:02`; NixOS names it `command0`
 and assigns `10.99.2.2/30`. The broker listens on `10.99.2.2:8080`, with TCP 8080
 allowed on that interface. The harness peer is `10.99.2.1/30`. There is no
 configured gateway, DNS, DHCP, or IP forwarding. Attach both command NICs to an
-isolated link when pairing VMs; host-side pairing is still a separate increment.
+isolated link when pairing VMs; the paired VM check below supplies that link.
 Without the expected NIC/address, preparation fails after a bounded wait.
 
 Serial logs and `journalctl -u experiment-broker -u experiment-target` show the broker's
@@ -540,8 +540,49 @@ an uncertain deadline report, broker exit, and systemd removal of the target
 and its cgroup. The deliberate timeout makes the broker unit fail as expected;
 the check passes only after the target unit finishes cleanup successfully.
 It retains logs and the overlay under
-`result-experiment-service/artifacts/`. It does not yet test the link from a
-separate harness VM or Ollama.
+`result-experiment-service/artifacts/`. This particular check uses a client in
+the experiment VM; the paired check below tests the separate harness VM.
+
+### Verify the harness and experiment VMs together
+
+Run on the KVM host:
+
+```sh
+nix build --option sandbox true --keep-failed -L \
+  .#checks.x86_64-linux.paired-vm \
+  --out-link result-paired-vm
+```
+
+The runner executes inside the Nix build sandbox. It boots fresh writable
+overlays of `experiment-image` and `harness-paired-smoke-image`, waits for broker
+readiness, and connects their command NICs through a private QEMU Unix socket.
+This carries Ethernet directly between the two guests: no host bridge, TAP,
+port forwarding, or shared directory is needed for command execution.
+
+Only inference is simulated. The harness inference NIC uses a restricted QEMU
+network forwarding its one inference endpoint to a fake model inside the build
+sandbox. The model requests `id -u; id -g; pwd; printf 'paired-smoke\n'` and
+accepts only the exact returned tool report before requesting submission.
+The command goes through the real HTTP broker and Podman adapter in the
+experiment VM. Expected output is UID/GID 1000, `/work`, and `paired-smoke`,
+with runtime status 0 and `parent_observed` provenance.
+
+The harness verifies its complete report and its ownership/mode, then powers
+off. The runner requests ACPI shutdown of the experiment VM through a private
+QEMU monitor and requires successful broker shutdown and target cleanup in its
+serial log. Both QEMU processes have bounded runtime and output capture;
+failures trigger process cleanup and retain diagnostic logs.
+
+Successful builds retain the manifest, ISO, both overlays, and separate
+`harness/` and `experiment/` logs under `result-paired-vm/artifacts/`.
+Failed builds retain artifacts in the build directory printed by `--keep-failed`.
+Fixtures live in `tests/fixtures/paired-{manifest,report}.json`; the runner is
+`tests/connected_vm/paired.rs`. The ordinary harness image still does not start
+trials automatically.
+
+This proves the functional path from the harness through the broker to the
+container and back, plus orderly cleanup. It does not connect to Ollama or
+establish an isolation verdict. Authentication remains deferred.
 
 [`nixos/podman-runtime-smoke.nix`](nixos/podman-runtime-smoke.nix) imports the same
 foundation and adds the selected target, test execution, cleanup, and automatic
@@ -691,10 +732,11 @@ Successful local writes cannot prove the client received a report. Full bounds,
 HTTP failure behavior, and lifecycle obligations are in
 [COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md).
 
-The broker is a library, without a standalone executable yet. Its own tests use
-fake `TargetSession` implementations; `tests/podman.rs` also exercises it with
-the Podman adapter above. The existing connected VM smoke test still uses its
-scripted endpoint. Run the broker tests inside the devcontainer:
+The broker library backs the standalone `experiment-broker` executable deployed
+above. Its own tests use fake `TargetSession` implementations;
+`tests/podman.rs` also exercises it with the Podman adapter. The original
+connected VM smoke test uses a scripted command endpoint; the paired VM check
+uses the deployed broker and real target. Run the broker tests inside the devcontainer:
 
 ```sh
 nix develop --command cargo test --locked --test broker
@@ -719,7 +761,7 @@ It creates a current-thread Tokio runtime, constructs both HTTP clients using th
 manifest settings, and drives the existing async loop. Both endpoints must be
 reachable from wherever the executable runs. No retries or automatic restart are
 added. The intended deployment is the `harness` account inside the harness VM.
-Automatic startup is currently enabled only in the connected smoke-test image.
+Automatic harness startup is enabled only in the connected and paired smoke-test images.
 
 The command writes one final JSON object followed by a newline to stdout.
 Operational errors before a report exists, or while writing it, go to stderr.

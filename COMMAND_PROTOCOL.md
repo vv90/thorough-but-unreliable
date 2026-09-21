@@ -188,7 +188,10 @@ including a harness-client/broker/adapter round trip. The separate
 inside a disposable VM and a fixture supervisor that verifies target cleanup.
 The user confirmed that sandboxed KVM check passed. The newer
 `checks.x86_64-linux.experiment-service` checks the standalone executable and
-systemd cleanup through the VM's configured command address. Paired-VM lifecycle
-and physical-host supervision remain unimplemented. Runtime
+systemd cleanup through the VM's configured command address.
+`checks.x86_64-linux.paired-vm` connects a separate harness VM to that deployed
+broker over an isolated Ethernet stream, with fake inference, exact report
+verification, and orderly experiment shutdown. General physical-host trial
+supervision remains unimplemented. Runtime
 status preserves its uncertainty through this protocol, model-facing presentation,
 and the final harness report.

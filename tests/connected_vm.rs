@@ -1,6 +1,8 @@
 //! Opt-in KVM test of the bootable image. The ordinary test validates the same
 //! fixtures against the executable without needing QEMU or KVM.
 
+#[path = "connected_vm/paired.rs"]
+mod paired;
 mod support;
 use serde_json::{Value, json};
 use std::{
@@ -82,6 +84,7 @@ async fn drive(
     inference: TcpListener,
     broker: TcpListener,
     directory: &Path,
+    exchanges: Vec<Exchange>,
 ) -> TestResult<Output> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -112,7 +115,7 @@ async fn drive(
             wait,
             read_out,
             read_err,
-            serve(inference, broker, script()?.into(), received)
+            serve(inference, broker, exchanges.into(), received)
         )?;
         Ok::<_, TestError>(status)
     })
@@ -160,7 +163,7 @@ async fn connected_fixtures_match_executable_report() -> TestResult {
     std::fs::write(&path, serde_json::to_vec(&manifest)?)?;
     let mut command = Command::new(env!("CARGO_BIN_EXE_harness"));
     command.args(["run", "--manifest"]).arg(path);
-    let output = drive(spawn(command)?, inference, broker, &directory).await?;
+    let output = drive(spawn(command)?, inference, broker, &directory, script()?).await?;
     assert!(
         output.status.success(),
         "{}",
@@ -263,7 +266,7 @@ async fn connected_vm_smoke() -> TestResult {
         qemu.arg("-device")
             .arg(format!("virtio-net-pci,netdev={id},mac={mac}"));
     }
-    let output = drive(spawn(qemu)?, inference, broker, &directory).await?;
+    let output = drive(spawn(qemu)?, inference, broker, &directory, script()?).await?;
     assert!(
         output.status.success(),
         "QEMU failed: {}",
