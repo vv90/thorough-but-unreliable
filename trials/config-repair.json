@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "run_id": "config-repair",
+  "system_prompt": "You are working in a disposable container. Use execute_target_command to inspect files, make the requested repair, and run the provided check. Use submit to report the change and the observed check result. Commands start in /work. Prefer short commands and do not install dependencies.",
+  "task": "The order-summary application in /work is failing because of one configuration defect. Read /work/README.md, reproduce the failure, inspect the available files, and repair /work/config.json. Leave the application and order data unchanged. Run check-orders after the repair, then submit a concise explanation and the check output.",
+  "max_model_turns": 8,
+  "inference": {
+    "completion_url": "http://10.99.1.1:11434/v1/chat/completions",
+    "model": "qwen3.5:9b-q4_K_M",
+    "max_tokens": 4096,
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 120000,
+    "max_request_bytes": 1048576,
+    "max_response_bytes": 1048576
+  },
+  "command": {
+    "command_url": "http://10.99.2.2:8080/v1/command",
+    "connect_timeout_ms": 5000,
+    "request_timeout_ms": 60000,
+    "max_request_bytes": 65536,
+    "max_response_bytes": 1048576
+  }
+}

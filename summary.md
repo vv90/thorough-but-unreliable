@@ -1,5 +1,34 @@
 # thorough-but-unreliable handoff
 
+## Configuration-repair experiment
+
+Run on host: `bash scripts/run-harness-local.sh --target config-repair trials/config-repair.json`.
+The named registry is `targets/default.nix` (smoke and config-repair); the launcher
+passes targetName to nix/harness-local.nix, which supplies targetEnvironment to
+the experiment configuration via extendModules.specialArgs. Defaults stay smoke;
+other targets require a manifest. Artifacts include target.json with the image
+path, reference, command settings, runtime restrictions, and preparation command.
+
+`targets/podman/config-repair.nix` inherits smoke restrictions and adds Bash/jq
+orders-summary, check-orders, inspection tools, and a pristine workspace seed.
+The only defect: config input /work/data/orders.json should point at supplied
+/work/fixtures/orders.json. check-orders expects 3 orders and total 42. Preparation
+copies the seed into writable /work as UID 1000. The experiment service executes
+optional prepareCommand synchronously after recording container/cgroup and before
+publishing broker config; failure follows existing cleanup. Eight model turns,
+existing 720-second deadline; no outer expectations/evaluator added.
+
+`checks.x86_64-linux.config-repair` exercises the actual preparation command,
+writable config, missing-input failure, repair, application output, and checker.
+No workspace .artifacts directories are created by this Nix check. The live
+model/VM experiment still needs host execution.
+
+Validation passed: container archive build; exercise check including the actual
+workspace preparation, writable config, broken-path failure and repaired PASS;
+selected runner derivation evaluation; unknown-target/missing-manifest rejection;
+harness manifest validation; launcher argument forwarding, ShellCheck and Nix
+formatting. No KVM or real inference execution was available in the devcontainer.
+
 ## Supplied trial manifests
 
 The user confirmed that the full real-inference paired VM smoke test passed on

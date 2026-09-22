@@ -522,7 +522,61 @@ guest crashes, supervisor timeouts, and failed cleanup still fail the build.
 The existing 720-second guest trial deadline and 1 MiB report export limit remain
 in force. Increasing the turn budget does not extend the wall-clock deadline;
 choose request timeouts and turn counts accordingly. No target-environment or
-network configuration is selected by the manifest in this increment.
+network configuration is selected by the manifest; the launcher selects the
+target separately.
+
+### Configuration-repair experiment
+
+Run on the host:
+
+```sh
+bash scripts/run-harness-local.sh --target config-repair trials/config-repair.json
+```
+
+This selects the `config-repair` target from `targets/default.nix`. The equivalent
+build command is:
+
+```sh
+nix build --option sandbox true --builders '' --impure --keep-failed -L \
+  --file ./nix/harness-local.nix \
+  --argstr runId "$(date +%s%N)-$$" \
+  --argstr targetName config-repair \
+  --argstr manifestPath "$(realpath trials/config-repair.json)" \
+  --argstr socketPath /run/harness-inference/gateway.sock \
+  --out-link result-harness-local
+```
+
+The container contains a small Bash/jq order-summary application, a JSON config,
+three orders, and instructions in `/work/README.md`. Its one defect is an input
+path: the config points at `/work/data/orders.json`, while the supplied data is
+in `/work/fixtures/orders.json`. The model must reproduce the error, inspect
+files, edit the config, run `check-orders`, and submit what it changed and the
+observed result. The manifest gives it eight model turns within the existing
+720-second overall trial deadline.
+
+`check-orders` reports `PASS: 3 orders, total 42` after the intended repair.
+This is an in-target check for the model to use; the outer runner still records
+the trial without grading its answer or enforcing that the model ran the check.
+Inspect the command history and submission in `harness/report.json`.
+
+The target keeps the smoke target's UID/GID 1000, no network, read-only root,
+resource limits, and writable 1 MiB `/work` tmpfs. A synchronous preparation
+command copies pristine files from the image into that tmpfs before the broker
+starts. Changes disappear with the container. Bash, coreutils, find, grep, sed,
+and jq are provided; no downloads or Python are needed inside the target.
+
+The launcher defaults to `--target smoke`. Unknown names are rejected by Nix,
+and selecting another target requires a manifest. Successful runs also retain
+`result-harness-local/artifacts/target.json`, containing the selected name,
+image store path/reference, runtime policy, command settings, and preparation
+command. The target selection is trusted launcher configuration.
+
+To verify the exercise's preparation, initial failure, and repaired result
+without a VM or model, run:
+
+```sh
+nix build .#checks.x86_64-linux.config-repair --no-link -L
+```
 
 ## Target execution interface
 
@@ -747,7 +801,7 @@ poweroff. The existing Podman check below continues to exercise that setup.
 
 ### Define a target environment
 
-The current Podman target is defined in
+The default Podman target is defined in
 [`targets/podman/smoke.nix`](targets/podman/smoke.nix). It is a Nix function taking
 `pkgs` from the pinned Nixpkgs and returning:
 
@@ -757,6 +811,7 @@ The current Podman target is defined in
 | `imageReference` | Local image name and `latest` tag used after loading the archive. |
 | `runArgs` | List of Podman runtime arguments defining networking, filesystem access, privileges, and resource limits. Each entry is one argument, not a shell fragment. |
 | `command` | Broker execution settings: `uid`, `gid`, absolute `shell` and `workdir`, and `environment` as a list of `[name, value]` pairs. Duplicate names are rejected. |
+| `prepareCommand` (optional) | An argv list run with `podman exec` as the container's configured user before the live broker starts. Failure aborts setup and triggers cleanup. |
 
 To define a target:
 
@@ -765,7 +820,9 @@ To define a target:
    in `image.config`.
 2. Set the runtime policy in `runArgs`. The current fixture has no network, a
    read-only root, no capabilities, and a bounded writable `/work` tmpfs.
-3. Select the definition through `targetEnvironment` in the flake's
+3. Register the definition in `targets/default.nix` and select it using
+   `scripts/run-harness-local.sh --target NAME MANIFEST.json`. The standalone
+   default remains `targetEnvironment` in the flake's
    `nixosConfigurations.experiment.specialArgs`. The service smoke configuration
    selects its target separately in `nixosConfigurations.experiment-smoke`;
    the older adapter fixture uses `nixosConfigurations.podman-runtime-smoke`.

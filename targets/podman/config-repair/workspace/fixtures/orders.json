@@ -1,0 +1,5 @@
+[
+  { "item": "notebook", "quantity": 2, "unit_price": 7 },
+  { "item": "pencil", "quantity": 3, "unit_price": 4 },
+  { "item": "folder", "quantity": 1, "unit_price": 16 }
+]

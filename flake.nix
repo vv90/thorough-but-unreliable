@@ -238,6 +238,7 @@
       };
 
       checks.${system} = {
+        config-repair = (import ./targets/podman/config-repair.nix { inherit pkgs; }).check;
         paired-vm = self.checks.${system}.harness-connected-smoke.overrideAttrs (_: {
           pname = "paired-vm-smoke";
           HARNESS_SMOKE_IMAGE = "${

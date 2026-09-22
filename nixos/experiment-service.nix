@@ -123,6 +123,9 @@ in
         *) echo "unexpected target cgroup: $relative" >&2; exit 1 ;;
       esac
       printf '/sys/fs/cgroup%s\n' "$relative" > ${directory}/cgroup
+      ${lib.optionalString (targetEnvironment ? prepareCommand) ''
+        podman exec "$container_id" ${lib.escapeShellArgs targetEnvironment.prepareCommand}
+      ''}
       jq --arg id "$container_id" '. + {container_id: $id}' ${template} > ${directory}/config.json
     '';
     serviceConfig = {

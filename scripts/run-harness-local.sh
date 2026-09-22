@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# > 1 )); then
-  echo 'usage: bash scripts/run-harness-local.sh [MANIFEST.json]' >&2
+target_name=smoke
+if [[ "${1:-}" == --target ]]; then
+  if (( $# < 2 )) || [[ -z "$2" ]]; then
+    echo '--target requires a target name' >&2
+    exit 2
+  fi
+  target_name="$2"
+  shift 2
+fi
+if (( $# > 1 )) || [[ "${1:-}" == --* ]]; then
+  echo 'usage: bash scripts/run-harness-local.sh [--target NAME] [MANIFEST.json]' >&2
   exit 2
 fi
 manifest_args=()
@@ -29,6 +38,7 @@ run_id="$(date +%s%N)-$$"
 nix build --option sandbox true --builders '' --impure --keep-failed -L \
   --file ./nix/harness-local.nix \
   --argstr runId "$run_id" \
+  --argstr targetName "$target_name" \
   --argstr model "${INFERENCE_MODEL:-qwen3.5:9b-q4_K_M}" \
   --argstr socketPath "${INFERENCE_SOCKET:-/run/harness-inference/gateway.sock}" \
   "${manifest_args[@]}" \
