@@ -59,8 +59,14 @@ fn script() -> TestResult<Vec<Exchange>> {
 
 async fn artifact_directory() -> TestResult<PathBuf> {
     std::fs::create_dir_all(".artifacts")?;
+    let mut date = Command::new("date");
+    date.args(["-u", "+%Y%m%dT%H%M%S.%NZ"]);
+    let timestamp = String::from_utf8(tool(date).await?.stdout)?;
     let mut command = Command::new("mktemp");
-    command.args(["-d", ".artifacts/harness-connected.XXXXXX"]);
+    command.arg("-d").arg(format!(
+        ".artifacts/harness-connected.{}.XXXXXX",
+        timestamp.trim()
+    ));
     let output = tool(command).await?;
     let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
     println!("connected smoke artifacts: {}", path.display());

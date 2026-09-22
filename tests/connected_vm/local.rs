@@ -1,6 +1,10 @@
 //! Live inference mode of the paired VM runner. No command executes in the builder.
 use super::*;
 
+#[path = "trial.rs"]
+mod trial;
+pub(super) use trial::Trial;
+
 const COMMAND: &str = "id -u; id -g; pwd; printf 'paired-smoke\\n'";
 const ANSWER: &str = "1000\n1000\n/work\npaired-smoke";
 const PREFIX: &str = "HARNESS_REPORT:";
@@ -126,7 +130,7 @@ fn verify_report(report: &Value) -> TestResult {
     Ok(())
 }
 
-pub(super) async fn drive_live(mut child: Child, directory: &Path) -> TestResult {
+pub(super) async fn drive_live(mut child: Child, directory: &Path, trial: &Trial) -> TestResult {
     let mut console = Vec::new();
     let mut stderr = Vec::new();
     let result = timeout(Duration::from_secs(900), async {
@@ -166,7 +170,15 @@ pub(super) async fn drive_live(mut child: Child, directory: &Path) -> TestResult
     {
         return Err("guest run or report permissions failed".into());
     }
-    verify_report(&report)
+    trial.verify(&report)?;
+    println!(
+        "recorded outcome: {}",
+        report
+            .pointer("/outcome/kind")
+            .and_then(Value::as_str)
+            .ok_or("missing outcome")?
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -174,10 +186,24 @@ pub(super) async fn drive_live(mut child: Child, directory: &Path) -> TestResult
 async fn local_inference() -> TestResult {
     let socket = std::env::var("INFERENCE_SOCKET")?;
     forward(&socket)?;
-    let model = std::env::var("INFERENCE_MODEL")?;
-    run(Inference::Local { socket, model }).await?;
-    println!("local inference VM run: PASS (real inference, target command, submission, cleanup)");
-    Ok(())
+    let trial = match std::env::var_os("TRIAL_MANIFEST").filter(|path| !path.is_empty()) {
+        Some(path) => {
+            // Read at most the schema limit plus one byte, so oversized files
+            // fail validation before either VM starts.
+            use std::io::Read;
+            let limit = thorough_but_unreliable::manifest::MAX_MANIFEST_BYTES
+                .checked_add(1)
+                .ok_or("manifest bound overflow")?;
+            let mut text = String::new();
+            text.try_reserve(limit)?;
+            std::fs::File::open(path)?
+                .take(u64::try_from(limit)?)
+                .read_to_string(&mut text)?;
+            Trial::supplied(text)?
+        }
+        None => Trial::smoke(&std::env::var("INFERENCE_MODEL")?)?,
+    };
+    run(Inference::Local { socket, trial }).await
 }
 
 #[cfg(test)]
@@ -284,13 +310,60 @@ mod tests {
             )?;
             let mut command = Command::new("cat");
             command.arg(&transcript);
-            let result = drive_live(spawn(command)?, &directory).await;
+            let result = drive_live(spawn(command)?, &directory, &Trial::smoke("model")?).await;
             assert_eq!(result.is_ok(), succeeds);
             assert_eq!(
                 serde_json::from_slice::<Value>(&std::fs::read(directory.join("report.json"))?)?,
                 report
             );
             assert!(!std::fs::read(directory.join("console.log"))?.is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn general_trial_records_non_submission_but_requires_guest_completion() -> TestResult {
+        use thorough_but_unreliable::harness::{
+            report,
+            types::{Message, RunOutcome, RunReport},
+        };
+        let trial = Trial::supplied(manifest("model")?)?;
+        let config =
+            thorough_but_unreliable::manifest::Manifest::from_slice(trial.manifest().as_bytes())?;
+        let report = report::view(
+            config.run_id(),
+            &RunReport {
+                history: vec![
+                    Message::System(config.system_prompt().into()),
+                    Message::User(config.task().into()),
+                ],
+                outcome: RunOutcome::ModelTurnLimit,
+            },
+        );
+        for completed in [true, false] {
+            let directory = artifact_directory().await?;
+            let transcript = directory.join("input.txt");
+            let marker = if completed {
+                "harness local run: COMPLETE"
+            } else {
+                "harness local run: FAIL"
+            };
+            std::fs::write(
+                &transcript,
+                format!("{PREFIX}{}\n{marker}\n", serde_json::to_string(&report)?),
+            )?;
+            let mut command = Command::new("cat");
+            command.arg(&transcript);
+            assert_eq!(
+                drive_live(spawn(command)?, &directory, &trial)
+                    .await
+                    .is_ok(),
+                completed
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&std::fs::read(directory.join("report.json"))?)?,
+                report
+            );
         }
         Ok(())
     }

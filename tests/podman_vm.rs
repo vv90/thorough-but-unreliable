@@ -38,8 +38,14 @@ async fn vm_smoke(experiment: bool) -> TestResult {
         std::env::var_os("PODMAN_SMOKE_IMAGE").ok_or("missing PODMAN_SMOKE_IMAGE")?,
     )?;
     std::fs::create_dir_all(".artifacts")?;
+    let mut date = Command::new("date");
+    date.args(["-u", "+%Y%m%dT%H%M%S.%NZ"]);
+    let timestamp = String::from_utf8(tool(date).await?)?;
     let mut mktemp = Command::new("mktemp");
-    mktemp.args(["-d", ".artifacts/podman-runtime.XXXXXX"]);
+    mktemp.arg("-d").arg(format!(
+        ".artifacts/podman-runtime.{}.XXXXXX",
+        timestamp.trim()
+    ));
     let directory = PathBuf::from(String::from_utf8(tool(mktemp).await?)?.trim());
     println!("Podman VM artifacts: {}", directory.display());
     let overlay = directory.join("experiment.qcow2");

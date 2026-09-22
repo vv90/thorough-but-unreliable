@@ -1,5 +1,39 @@
 # thorough-but-unreliable handoff
 
+## Supplied trial manifests
+
+The user confirmed that the full real-inference paired VM smoke test passed on
+the host. The next increment adds an optional manifest argument:
+`bash scripts/run-harness-local.sh trials/hello.json`. No argument retains the
+strict smoke test. README is the command source of truth; `trials/hello.json`
+is a small editable example with four model turns.
+
+`nix/harness-local.nix` accepts an absolute `manifestPath`, copies it into the
+store, and passes TRIAL_MANIFEST to the runner. This supports untracked and
+external files. The model, prompt, run ID, and turn budget come from the file;
+the wrapper rejects INFERENCE_MODEL with a supplied file. Socket selection
+remains independent. Manifest validation and fixed guest endpoint checks happen
+before VM startup. Original bytes are preserved in config/manifest.json and ISO.
+
+`tests/connected_vm/trial.rs` distinguishes strict smoke assessment from general
+report collection. General reports must match the manifest's version, run ID,
+initial prompts, and turn budget and carry a recognized terminal envelope.
+All terminal outcomes are retained, without grading the answer. For supplied
+trials only, systemd accepts CLI exit status 1 as well as 0; absent/invalid
+reports and crashes still fail collection. Cleanup verification remains shared
+and mandatory. Completion reads RECORDED rather than claiming task success.
+
+The fixed 720-second trial deadline and 1 MiB report limit remain. No target
+selection, arbitrary networking, authentication, or outcome evaluator is added.
+Validation: all 13 non-VM connected runner tests passed, including properties
+for byte/settings preservation and answer-independent recording with run-ID
+correlation, plus non-submission collection and required completion markers.
+Both Nix modes evaluated; the example passed the harness check-config command.
+Shell syntax/ShellCheck, formatting, and focused Clippy passed (with the existing
+unrelated chunks_exact_to_as_chunks lint suppressed). The supplied-manifest VM
+mode has not been run in this devcontainer.
+Next: run the example general trial on the host and inspect its recorded outcome.
+
 ## Full local inference VM run (2026-09-22)
 
 The user confirmed the real inference probe passed against qwen3.5:9b-q4_K_M:
@@ -29,9 +63,8 @@ derivation evaluation, formatting, shell syntax/ShellCheck and focused Clippy
 (with the previously documented unrelated lint suppressed) passed. The live
 VM run has not been executed here.
 
-Next: user runs the full local inference check on the host; this devcontainer
-has neither /dev/kvm nor the host gateway socket. Authentication and isolation
-verdicts remain deferred.
+The user has now confirmed this full local inference check passed on the host.
+This devcontainer has neither /dev/kvm nor the host gateway socket.
 
 ## Real inference probe (2026-09-22)
 

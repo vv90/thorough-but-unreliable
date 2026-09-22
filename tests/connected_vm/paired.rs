@@ -13,7 +13,7 @@ mod local;
 
 enum Inference {
     Scripted,
-    Local { socket: String, model: String },
+    Local { socket: String, trial: local::Trial },
 }
 
 fn inference_script() -> TestResult<Vec<Exchange>> {
@@ -222,7 +222,7 @@ async fn run(inference_mode: Inference) -> TestResult {
     std::fs::create_dir(&config)?;
     let manifest = match &inference_mode {
         Inference::Scripted => PAIRED_MANIFEST.to_owned(),
-        Inference::Local { model, .. } => local::manifest(model)?,
+        Inference::Local { trial, .. } => trial.manifest().to_owned(),
     };
     std::fs::write(config.join("manifest.json"), manifest)?;
     let iso = directory.join("harness-config.iso");
@@ -291,8 +291,8 @@ async fn run(inference_mode: Inference) -> TestResult {
     let run_harness = async {
         let result = async {
             timeout(Duration::from_secs(180), readiness).await??;
-            if let Inference::Local { .. } = inference_mode {
-                return local::drive_live(spawn(harness_command)?, &harness_dir).await;
+            if let Inference::Local { trial, .. } = &inference_mode {
+                return local::drive_live(spawn(harness_command)?, &harness_dir, trial).await;
             }
             let output = drive(
                 spawn(harness_command)?,
@@ -331,6 +331,11 @@ async fn run(inference_mode: Inference) -> TestResult {
     }
     experiment_result?;
     harness_result?;
-    println!("paired VM smoke: PASS (real target report and experiment cleanup verified)");
+    match &inference_mode {
+        Inference::Scripted => {
+            println!("paired VM smoke: PASS (real target report and experiment cleanup verified)")
+        }
+        Inference::Local { trial, .. } => println!("{}", trial.completion_message()),
+    }
     Ok(())
 }

@@ -192,8 +192,13 @@ The derivation requires a builder advertising the `kvm` system feature. `-L`
 shows build logs; `--keep-failed` retains the build directory for diagnosis if
 the check fails. A successful result may be reused by Nix for unchanged inputs.
 
-The test creates a fresh `.artifacts/harness-connected.XXXXXX` directory inside
-the build directory, a config ISO, and writable disk overlay. It starts two
+VM run directories use `NAME.YYYYMMDDTHHMMSS.NNNNNNNNNZ.XXXXXX`: a readable run
+name, UTC date/time with nanoseconds, and a random suffix for uniqueness. Sorting
+by name groups each kind of run first, then orders its runs chronologically.
+This applies to `harness-connected`, `harness-smoke`, and `podman-runtime` runs.
+
+The test creates a fresh `.artifacts/harness-connected.TIMESTAMP.XXXXXX`
+directory inside the build directory, a config ISO, and writable disk overlay. It starts two
 loopback HTTP fixtures, then QEMU with the normal static MAC addresses. Each NIC
 has a separate restricted user-network backend with an explicit `guestfwd` rule: inference
 `10.99.1.1:11434` and broker `10.99.2.2:8080` map to their respective fixture's
@@ -471,6 +476,53 @@ parsed conversation and command result, not raw inference HTTP responses.
 Failed builds retain available artifacts in the build directory printed by
 `--keep-failed`; boot failures or timeouts may leave only logs and overlays.
 The original deterministic paired-VM smoke check remains available separately.
+
+### Run a supplied trial manifest
+
+The full local inference smoke test has passed on the host. To run a different
+task, start with `trials/hello.json`. Edit its `run_id`, `system_prompt`, `task`,
+`inference.model`, and `max_model_turns`, then run on the host:
+
+```sh
+bash scripts/run-harness-local.sh trials/hello.json
+```
+
+With no argument, the script still runs the strict smoke test above. With a
+manifest argument, it runs a general trial and records the outcome without
+grading the answer. The equivalent build command is:
+
+```sh
+nix build --option sandbox true --builders '' --impure --keep-failed -L \
+  --file ./nix/harness-local.nix \
+  --argstr runId "$(date +%s%N)-$$" \
+  --argstr manifestPath "$(realpath trials/hello.json)" \
+  --argstr socketPath /run/harness-inference/gateway.sock \
+  --out-link result-harness-local
+```
+
+The manifest may be outside the repository or untracked. Nix copies it into
+the store as a build input; the runner validates it before starting either VM
+and puts its original contents in the config ISO. The readable copy is retained
+at `config/manifest.json` alongside the VM artifacts. Prompts and other manifest
+contents therefore become store/build artifacts; do not put credentials in them.
+
+The supplied manifest is authoritative: `INFERENCE_MODEL` is rejected by the
+wrapper when a file is provided; set the model in that file. `INFERENCE_SOCKET`
+still selects the host gateway. This runner supports only the existing guest
+endpoints: `http://10.99.1.1:11434/v1/chat/completions` and
+`http://10.99.2.2:8080/v1/command`. Other addresses are rejected before VM startup.
+
+General trials print `local trial: RECORDED` after collecting a report matched
+to the manifest and verifying experiment cleanup. Submission, early termination,
+turn-limit exhaustion, model/protocol errors, and command/session failures are
+all recorded outcomes. A successful build means report collection and cleanup
+worked; inspect `harness/report.json` to assess the task. Missing/invalid reports,
+guest crashes, supervisor timeouts, and failed cleanup still fail the build.
+
+The existing 720-second guest trial deadline and 1 MiB report export limit remain
+in force. Increasing the turn budget does not extend the wall-clock deadline;
+choose request timeouts and turn counts accordingly. No target-environment or
+network configuration is selected by the manifest in this increment.
 
 ## Target execution interface
 

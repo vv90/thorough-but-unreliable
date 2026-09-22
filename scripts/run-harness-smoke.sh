@@ -12,7 +12,8 @@ cd -- "$repository_root"
 nix build .#harness-image --out-link result-harness
 
 mkdir -p .artifacts
-run_directory="$(mktemp -d .artifacts/harness-smoke.XXXXXX)"
+run_timestamp="$(date -u +%Y%m%dT%H%M%S.%NZ)"
+run_directory="$(mktemp -d ".artifacts/harness-smoke.$run_timestamp.XXXXXX")"
 config_directory="$run_directory/config"
 config_iso="$run_directory/harness-config.iso"
 overlay="$run_directory/harness.qcow2"
