@@ -1,5 +1,67 @@
 # thorough-but-unreliable handoff
 
+## Full local inference VM run (2026-09-22)
+
+The user confirmed the real inference probe passed against qwen3.5:9b-q4_K_M:
+two real tool-call exchanges with a synthetic command result (~57 seconds).
+
+`scripts/run-harness-local.sh` / `nix/harness-local.nix` now run the paired VMs
+with real inference, using sandboxed local nix build and a fresh run identity.
+`tests/connected_vm/paired.rs` shares setup/shutdown between scripted and local
+modes; `tests/connected_vm/local.rs` builds the manifest, validates safe socket
+paths, collects the guest report, and checks real command completion and model
+submission. `nixos/harness-local.nix` extends only the opt-in paired image:
+720-second trial deadline, bounded serial report export, then shutdown.
+The live experiment's broker lifetime is extended to 1300 seconds.
+
+The task requests one exact UID/GID/workdir/printf command and submission of
+its stdout. Two turns, 4096 tokens, 300-second inference timeout. The host-side
+QEMU guestfwd helper uses nc -U on the approved nginx socket. No host devshell.
+Successful artifacts include full parsed report, both consoles, manifest ISO,
+and overlays; orderly experiment cleanup remains mandatory. README documents
+the authoritative command and environment overrides.
+
+Validation: the full ordinary Rust suite passed. New tests cover generated
+manifest validation, arbitrary correlated call IDs, changed-output rejection,
+socket argument preservation/metacharacter rejection, report transport and
+ordering, and report retention on both success and semantic failure. Nix
+derivation evaluation, formatting, shell syntax/ShellCheck and focused Clippy
+(with the previously documented unrelated lint suppressed) passed. The live
+VM run has not been executed here.
+
+Next: user runs the full local inference check on the host; this devcontainer
+has neither /dev/kvm nor the host gateway socket. Authentication and isolation
+verdicts remain deferred.
+
+## Real inference probe (2026-09-22)
+
+The user configured a host nginx Unix gateway and global optional Nix sandbox
+exposure at `/run/harness-inference/gateway.sock`. The sandboxed GET /v1/models
+probe passed and returned `qwen3.5:9b-q4_K_M`. Per-derivation approval hooks were
+discussed but not adopted.
+
+`scripts/run-inference-probe.sh` now invokes `nix/inference-probe.nix` in a local
+sandboxed build with a fresh run ID. `tests/inference_socket.rs` reuses the
+harness wire encoder/parser and tool definitions over a probe-only Unix HTTP
+transport. It requests a printf tool call, supplies a synthetic hello result,
+and requires submission on turn two. No commands execute. Limits: 4096 tokens,
+300 seconds per request, 1 MiB request/response bodies, no retries. Requests,
+responses, statuses and outcome are retained, including available failure
+diagnostics. README documents invocation and artifacts. The temporary socket
+script forwards to the tracked script. The user has now confirmed real model
+interoperability; the devcontainer cannot reach the host gateway.
+
+Validation: the full Rust suite passed, including two Unix-endpoint tests
+(two-turn success and malformed-response retention/stop) and two properties
+(history/call-ID preservation and single-command batch admission). ShellCheck,
+shell syntax, Rust/Nix formatting and Nix derivation evaluation passed. The new
+probe passes Clippy with the existing `chunks_exact_to_as_chunks` lint suppressed
+on the command line. Unmodified full Clippy fails at two pre-existing sites in
+`src/command_protocol/wire.rs` and `src/harness/tests.rs` under the newer pinned
+Rust toolchain; no unrelated source changes were made.
+
+The subsequent paired-VM integration is described above.
+
 ## Paired VM increment (2026-09-20)
 
 `checks.x86_64-linux.paired-vm` now boots the live experiment image and an opt-in
@@ -27,8 +89,7 @@ it does not depend on the broker process's diagnostic reaching the poweroff
 console. No KVM device is available in this devcontainer, so the committed
 host KVM check still needs to be run by the user.
 
-Next: explicitly connect the harness inference endpoint to the host's Ollama
-server and select a tool-capable model. No real model has been contacted.
+The later real inference increments above supersede this section's next step.
 Authentication, general trial supervision, evidence collection, and isolation
 verdicts remain deferred. This section supersedes the pairing next-step note below.
 

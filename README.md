@@ -353,7 +353,8 @@ token-limit, size-limit, configuration, and other categories with diagnostics.
 The same Cargo commands above run property tests for wire conversion and size
 limits, plus local fake-server tests for request content, parsing, redirects,
 disconnects, status errors, body limits, and timeouts. No real Ollama service or
-VM is needed for these tests. Real Ollama interoperability remains untested.
+VM is needed for these tests. The separate real Ollama tool-call probe has also
+passed with `qwen3.5:9b-q4_K_M` (synthetic command result).
 Integration tests drive a command batch through the fake inference server and
 in-memory executor, verify the next HTTP request contains the ordered results,
 and finish on submission. They also cover failure handling, protocol rejection,
@@ -366,6 +367,110 @@ during future construction or after suspension.
 Protocol and transport references:
 [Ollama compatibility](https://docs.ollama.com/api/openai-compatibility),
 [Reqwest client configuration](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html).
+
+### Real inference tool-call probe
+
+The host gateway must expose `/run/harness-inference/gateway.sock` to Nix build
+users and the build sandbox. The host's sandboxed `/v1/models` probe has passed;
+the selected installed model is `qwen3.5:9b-q4_K_M`.
+
+Run on the host, as your normal user:
+
+```sh
+bash scripts/run-inference-probe.sh
+```
+
+The convenience script runs the following build from the repository root, with
+a fresh run ID to prevent reuse of cached inference results:
+
+```sh
+nix build --option sandbox true --builders '' --impure --keep-failed -L \
+  --file ./nix/inference-probe.nix \
+  --argstr runId "$(date +%s%N)-$$" \
+  --argstr model 'qwen3.5:9b-q4_K_M' \
+  --argstr socketPath /run/harness-inference/gateway.sock \
+  --out-link result-inference-probe
+```
+
+`--impure` permits evaluation of the local Git flake; build execution remains
+sandboxed. Remote builders and substitution of the probe result are disabled.
+The script accepts `INFERENCE_MODEL` and `INFERENCE_SOCKET` environment overrides.
+
+The Rust probe in `tests/inference_socket.rs` uses the harness's actual request
+encoder, tool definitions, and response parser, with a probe-only Unix-socket
+HTTP transport. It asks for exactly one `execute_target_command` call with
+`printf 'hello\n'`, supplies a **synthetic** successful report containing
+`hello\n`, then requires exactly one `submit` call with answer `hello`.
+No target command executes and no VM is started. A failure can indicate schema
+incompatibility, failure to follow this small task, token exhaustion, or a
+transport error; it is not an isolation verdict.
+
+Requests use the existing harness options (`tool_choice: auto`, non-streaming),
+4096 maximum tokens, a 5-second connection timeout, and a 300-second timeout per
+request. Request and response bodies are bounded to 1 MiB. There are no retries.
+The gateway's upstream timeout must also accommodate local model loading.
+
+Successful builds save both requests, both responses, HTTP statuses, and
+`result.txt` under `result-inference-probe/artifacts/inference-probe/`. Failed
+builds retain available diagnostic artifacts under `.artifacts/inference-probe/`
+in the source directory of the build directory reported by `--keep-failed`.
+Transport failures may occur before a response is available; body-read failures
+retain the bounded partial response. The old temporary
+`.artifacts/check-inference-socket.sh` forwards to this script when present.
+
+### Full local inference run
+
+With the working host inference socket exposed to Nix builds and KVM available,
+run from the repository root on the host:
+
+```sh
+bash scripts/run-harness-local.sh
+```
+
+The script is a convenience wrapper for:
+
+```sh
+nix build --option sandbox true --builders '' --impure --keep-failed -L \
+  --file ./nix/harness-local.nix \
+  --argstr runId "$(date +%s%N)-$$" \
+  --argstr model 'qwen3.5:9b-q4_K_M' \
+  --argstr socketPath /run/harness-inference/gateway.sock \
+  --out-link result-harness-local
+```
+
+1. The build prepares both images and fresh disposable overlays, then boots the
+   experiment VM and waits for its broker. The target remains the container
+   defined in `targets/podman/smoke.nix`.
+2. It boots the harness VM with a generated manifest. Its restricted inference
+   NIC forwards only `10.99.1.1:11434` through `nc -U` to the host gateway socket.
+   Its command NIC connects directly to the experiment VM's private Ethernet
+   stream. QEMU, netcat, and the runner execute inside the build sandbox.
+3. The real model is asked to execute `id -u; id -g; pwd; printf 'paired-smoke\n'`
+   once, then submit stdout without its final newline. The runner checks the
+   actual target result (`1000`, `1000`, `/work`, `paired-smoke`), successful
+   parent-observed runtime status, ready session, and matching submission.
+4. The harness exports its report and powers off. The runner requests experiment
+   shutdown and requires successful broker/target shutdown plus container and
+   recorded cgroup removal before reporting PASS.
+
+The wrapper accepts `INFERENCE_MODEL` and `INFERENCE_SOCKET`. Socket paths must
+be absolute, at most 107 bytes, and contain only ASCII letters, digits, `/`, `.`,
+`_`, and `-`, because QEMU interprets the forwarding command. No shell syntax is
+accepted. No host development shell is used. Each invocation has a fresh build
+identity, so cached model responses cannot stand in for a new run.
+
+The trial allows two model turns, 4096 tokens each, and 300 seconds per inference
+request, without retries. The guest trial has a 720-second deadline; supervisors
+also bound VM lifetime and log size. A model that does not follow this small
+task fails the check; this is an integration check, not an isolation verdict.
+
+Successful builds retain `harness/report.json`, both VMs' console/stderr logs,
+the manifest ISO, and overlays under
+`result-harness-local/artifacts/harness-connected.*/`. The report contains the
+parsed conversation and command result, not raw inference HTTP responses.
+Failed builds retain available artifacts in the build directory printed by
+`--keep-failed`; boot failures or timeouts may leave only logs and overlays.
+The original deterministic paired-VM smoke check remains available separately.
 
 ## Target execution interface
 

@@ -1,4 +1,4 @@
-//! Two QEMU guests, a private Ethernet stream, and only a fake inference endpoint.
+//! Two QEMU guests, a private Ethernet stream, and scripted or live inference.
 //! The experiment uses the live image; no command fixture or test agent runs there.
 use super::*;
 use tokio::io::{AsyncRead, AsyncWriteExt};
@@ -7,6 +7,14 @@ use tokio::net::UnixStream;
 const PAIRED_MANIFEST: &str = include_str!("../fixtures/paired-manifest.json");
 const PAIRED_REPORT: &str = include_str!("../fixtures/paired-report.json");
 const READY: &str = "experiment broker: ready listen=10.99.2.2:8080";
+
+#[path = "local.rs"]
+mod local;
+
+enum Inference {
+    Scripted,
+    Local { socket: String, model: String },
+}
 
 fn inference_script() -> TestResult<Vec<Exchange>> {
     let expected: Value = serde_json::from_str(PAIRED_REPORT)?;
@@ -93,10 +101,11 @@ async fn experiment(
     ready: oneshot::Sender<()>,
     stop: oneshot::Receiver<()>,
     monitor: &Path,
+    deadline: Duration,
 ) -> TestResult {
     let mut console = Vec::new();
     let mut stderr = Vec::new();
-    let result = timeout(Duration::from_secs(360), async {
+    let result = timeout(deadline, async {
         let out = child.stdout.take().ok_or("missing experiment stdout")?;
         let err = child.stderr.take().ok_or("missing experiment stderr")?;
         let shutdown = async {
@@ -192,6 +201,14 @@ async fn overlay(image_variable: &str, directory: &Path) -> TestResult<PathBuf> 
 #[tokio::test]
 #[ignore = "requires KVM; use the sandboxed Nix paired-vm check"]
 async fn paired_vm_smoke() -> TestResult {
+    run(Inference::Scripted).await
+}
+
+async fn run(inference_mode: Inference) -> TestResult {
+    let deadline = Duration::from_secs(match &inference_mode {
+        Inference::Scripted => 360,
+        Inference::Local { .. } => 1200,
+    });
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -203,7 +220,11 @@ async fn paired_vm_smoke() -> TestResult {
     let experiment_disk = overlay("EXPERIMENT_IMAGE", &experiment_dir).await?;
     let config = directory.join("config");
     std::fs::create_dir(&config)?;
-    std::fs::write(config.join("manifest.json"), PAIRED_MANIFEST)?;
+    let manifest = match &inference_mode {
+        Inference::Scripted => PAIRED_MANIFEST.to_owned(),
+        Inference::Local { model, .. } => local::manifest(model)?,
+    };
+    std::fs::write(config.join("manifest.json"), manifest)?;
     let iso = directory.join("harness-config.iso");
     let mut mkiso = Command::new("xorrisofs");
     mkiso
@@ -238,6 +259,10 @@ async fn paired_vm_smoke() -> TestResult {
     let inference = TcpListener::bind("127.0.0.1:0").await?;
     // Unconnected sentinel: the script rejects any accidental fake-broker use.
     let unused_broker = TcpListener::bind("127.0.0.1:0").await?;
+    let forward = match &inference_mode {
+        Inference::Scripted => format!("nc 127.0.0.1 {}", inference.local_addr()?.port()),
+        Inference::Local { socket, .. } => local::forward(socket)?,
+    };
     let mut harness_command = qemu(&harness_disk, "1024");
     harness_command.args(["-monitor", "none"]);
     harness_command.arg("-drive").arg(format!(
@@ -253,8 +278,7 @@ async fn paired_vm_smoke() -> TestResult {
         "virtio-net-pci,netdev=command,mac=52:54:00:99:02:01",
     ]);
     harness_command.arg("-netdev").arg(format!(
-        "user,id=inference,net=10.99.1.0/24,host=10.99.1.254,dns=10.99.1.253,ipv6=off,restrict=on,guestfwd=tcp:10.99.1.1:11434-cmd:nc 127.0.0.1 {}",
-        inference.local_addr()?.port()
+        "user,id=inference,net=10.99.1.0/24,host=10.99.1.254,dns=10.99.1.253,ipv6=off,restrict=on,guestfwd=tcp:10.99.1.1:11434-cmd:{forward}"
     ));
     harness_command.args([
         "-device",
@@ -267,6 +291,9 @@ async fn paired_vm_smoke() -> TestResult {
     let run_harness = async {
         let result = async {
             timeout(Duration::from_secs(180), readiness).await??;
+            if let Inference::Local { .. } = inference_mode {
+                return local::drive_live(spawn(harness_command)?, &harness_dir).await;
+            }
             let output = drive(
                 spawn(harness_command)?,
                 inference,
@@ -290,7 +317,7 @@ async fn paired_vm_smoke() -> TestResult {
         result
     };
     let (experiment_result, harness_result) = tokio::join!(
-        experiment(child, &experiment_dir, ready, stopped, &monitor),
+        experiment(child, &experiment_dir, ready, stopped, &monitor, deadline),
         run_harness,
     );
     // Nix outputs contain regular artifacts, not stale control/network sockets.
