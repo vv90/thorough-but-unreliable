@@ -1,5 +1,14 @@
 # thorough-but-unreliable
 
+A Rust model/tool harness for trials against disposable, Nix-defined targets.
+The current deployment pairs a harness VM with an experiment VM running a broker
+and a Podman target; real local inference has passed end to end.
+
+See [EXPERIMENTS.md](EXPERIMENTS.md) for the experiment setup procedure. This
+README remains the source of truth for build/run commands and runtime limits.
+[COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md) specifies the command API, and
+[IMPLEMENTATION.md](IMPLEMENTATION.md) contains implementation rules.
+
 ## Harness base image
 
 `nixos/harness-vm.nix` defines the initial x86_64 NixOS guest. The flake exposes
@@ -10,17 +19,15 @@ at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled. A
 noninteractive `harness` service account owns `/var/lib/harness`; a boot-time
 readiness unit verifies its fixed UID/GID and state-directory access.
 The two MAC-matched interfaces use fixed addresses with no default route or
-DNS. The image contains the initial Rust `harness` binary; its boot-time
-configuration unit uses that binary to validate the per-run manifest. The
-model/tool loop has a deterministic library core tested with scripted fakes;
-the VM does not run model requests yet.
+DNS. The image contains the Rust `harness` binary; its boot-time configuration
+unit validates the per-run manifest. The base image does not start a trial
+automatically. The connected smoke and local-trial image extensions add startup,
+report handling, and shutdown services.
 
-The current application direction is a small Rust harness with a custom
-model/tool loop. It will call the host's OpenAI-compatible Ollama endpoint,
-expose `execute_target_command` and `submit` to the model, and send target
-commands through the experiment broker. Inspect AI remains an option for a
-later evaluation layer; it is not a planned runtime dependency for the first
-end-to-end trial. See [summary.md](summary.md) for the broader architecture.
+The custom Rust loop calls an OpenAI-compatible inference endpoint, exposes
+`execute_target_command` and `submit` to the model, and sends commands through
+the experiment broker. Inspect AI and Python are not runtime dependencies of
+the harness. [summary.md](summary.md) is a temporary current-state handoff.
 
 On the external Linux builder with KVM available:
 
@@ -28,11 +35,16 @@ On the external Linux builder with KVM available:
 nix build .#harness-image --out-link result-harness
 ```
 
-The image builder itself requires KVM. This unprivileged devcontainer can
-evaluate the derivation but cannot assemble or boot it locally.
+Use the external KVM builder for supported image builds and VM checks. The
+development container has no `/dev/kvm`; evaluation and non-VM checks run there.
 The output disk is `result-harness/harness.qcow2`.
 
 ### Run a boot smoke test with KVM
+
+These are the original manual base-image inspection instructions. They launch
+QEMU directly on the host, outside the build sandbox. For routine verification,
+use the [sandboxed connected check](#run-the-connected-vm-smoke-test-with-kvm)
+or [full local inference runner](#full-local-inference-run).
 
 Run the following commands from the repository root on the KVM host. Create a
 disposable writable overlay so the built base image remains unchanged:
@@ -140,7 +152,7 @@ Without an attached configuration ISO, the guest still boots and prints
 `harness config: no configuration media attached`. An attached manifest must be
 a JSON object matching the schema above, with every field supplied explicitly.
 The typed Rust loader enforces the [manifest rules](#manifest-validation).
-It can also be run directly as:
+Inside the devcontainer, validation can also be run directly as:
 
 ```sh
 nix run .#harness -- check-config --manifest PATH
@@ -148,8 +160,9 @@ nix run .#harness -- check-config --manifest PATH
 
 This expands the early version-1 schema; old two-field manifests are rejected.
 Regenerate the configuration ISO when rebuilding the image. The endpoint
-addresses, broker port, model, and limits above are example settings for a future
-connected trial. The boot check only validates configuration and does not contact
+addresses, broker port, model, and limits above are configuration-check examples;
+`qwen3:latest` is a placeholder, not the selected real-inference model.
+The boot check only validates configuration and does not contact
 either endpoint, so the disconnected smoke test still works. Before a real run,
 choose a model available at the inference endpoint and allow enough command
 request time for the broker's execution deadline, cleanup, and reporting.
@@ -196,6 +209,8 @@ VM run directories use `NAME.YYYYMMDDTHHMMSS.NNNNNNNNNZ.XXXXXX`: a readable run
 name, UTC date/time with nanoseconds, and a random suffix for uniqueness. Sorting
 by name groups each kind of run first, then orders its runs chronologically.
 This applies to `harness-connected`, `harness-smoke`, and `podman-runtime` runs.
+Ordinary connected-runner tests also create directories under `.artifacts` for
+local fake-process/report checks; these directories do not imply a VM was run.
 
 The test creates a fresh `.artifacts/harness-connected.TIMESTAMP.XXXXXX`
 directory inside the build directory, a config ISO, and writable disk overlay. It starts two
@@ -292,8 +307,9 @@ The turn budget bounds model calls. Zero permits no calls; commands in the last
 allowed response finish while the target remains usable, before the budget
 prevents another model request.
 A submission or failure on that last turn keeps its specific outcome.
-Run-wide wall-clock/output limits and incremental event export are future
-increments. The existing VM smoke test still exercises manifest loading.
+The core has no aggregate history-size limit or incremental event export.
+The local VM runner supplies an external wall-clock deadline and bounded logs
+and report export; it does not bound all memory used by the loop's history.
 
 Dependency calls catch unwinding panics as explicit failures and stop. Discard
 the adapters after such a failure. Process aborts cannot be caught; the driver
@@ -310,6 +326,11 @@ nix develop --command cargo test --locked
 nix develop --command cargo clippy --locked --all-targets -- -D warnings
 nix develop --command cargo fmt --check
 ```
+
+The current pinned toolchain reports two existing `chunks_exact_to_as_chunks`
+Clippy warnings in `src/command_protocol/wire.rs` and `src/harness/tests.rs`.
+They make the strict lint command fail independently of test results. A focused
+check can suppress that known lint with `-A clippy::chunks_exact_to_as_chunks`.
 
 Properties cover ordered/correlated command results, complete transcripts,
 deterministic replay, exact submission, early termination, validation before
@@ -420,8 +441,8 @@ Successful builds save both requests, both responses, HTTP statuses, and
 builds retain available diagnostic artifacts under `.artifacts/inference-probe/`
 in the source directory of the build directory reported by `--keep-failed`.
 Transport failures may occur before a response is available; body-read failures
-retain the bounded partial response. The old temporary
-`.artifacts/check-inference-socket.sh` forwards to this script when present.
+retain the bounded partial response. Use the tracked script above; temporary
+helpers under `.artifacts` are not required.
 
 ### Full local inference run
 
@@ -584,7 +605,8 @@ nix build .#checks.x86_64-linux.config-repair --no-link -L
 to a prepared container, VM, or other target. Trusted setup binds the target,
 execution identity, shell, initial directory, environment, and limits. Each
 `execute` request contains only a sequence number and command text. The broker
-owns authentication and duplicate/out-of-order request rejection.
+rejects duplicate/out-of-order requests. Authentication belongs at this boundary
+but remains deferred.
 
 An `ExecutionReport` contains a sequence and an `ExecutionOutcome`. Only outcomes
 where execution may have started carry raw stdout/stderr with truncation flags;
@@ -610,7 +632,9 @@ future requires discarding the session and notifying supervision. If termination
 cannot be confirmed at a deadline, supervision must end the trial.
 
 The trait, data types, and Podman adapter are implemented, with a real-runtime
-VM check described below. Production target lifecycle management remains pending. The separate
+VM check described below. The experiment service prepares and removes the
+selected Podman target, and the paired runner supervises both VMs. Other target
+backends and a general deployment controller remain unimplemented. The separate
 command protocol maps these internal types to its wire schema.
 The harness's `async_driver::CommandExecutor` remains the client-side interface;
 `src/broker` translates between HTTP and `TargetSession`.
@@ -694,8 +718,9 @@ nix develop --command cargo test --locked --test podman
 
 [`nixos/experiment-vm.nix`](nixos/experiment-vm.nix) defines the shared NixOS
 experiment VM foundation: a disposable BIOS-booted qcow2 image, serial logs,
-locked logins, and Podman with a root-only Unix socket. Its flake configuration
-is `nixosConfigurations.experiment`. Build it on the host with:
+locked logins, and Podman with a root-only Unix socket. The flake configuration
+`nixosConfigurations.experiment` imports the service module as well, so its
+image includes the default smoke target and broker. Build it on the host with:
 
 ```sh
 nix build --option sandbox true -L .#experiment-image --out-link result-experiment
@@ -706,7 +731,8 @@ The image is `result-experiment/experiment.qcow2`.
 preparation, the standalone broker, and command networking to that foundation.
 On boot, `experiment-target.service` loads the selected container archive,
 creates one restricted target, records its ID and cgroup under `/run/experiment`,
-and writes a mode-0600 broker configuration there. `experiment-broker.service`
+runs any target-specific `prepareCommand`, and writes a mode-0600 broker
+configuration there. `experiment-broker.service`
 starts after preparation and runs
 `experiment-broker --config /run/experiment/config.json` as root in the VM,
 with access to the root-only Podman socket. The target receives no such access.
@@ -731,7 +757,8 @@ for the next trial.
 Command deadlines are 30 seconds, with a 35-second broker watchdog and 5-second
 HTTP read/write limits. Each stream retains at most 64 KiB; commands are at most
 4096 bytes. Systemd caps broker runtime at 15 minutes and stop operations at
-60 seconds. These are explicit initial settings in `experiment-service.nix`.
+60 seconds. These are the defaults in `experiment-service.nix`; the local-trial
+derivation extends the broker runtime to 1300 seconds.
 When connecting a live harness, set its command URL to
 `http://10.99.2.2:8080/v1/command`, request timeout to 60000 ms, and response
 limit to 1048576 bytes so it can receive the broker's bounded reports.
@@ -894,7 +921,7 @@ Both new tests are ignored by ordinary `cargo test`: it compiles them but does
 not establish real-runtime success. Run the explicit KVM check above. This
 workspace has no KVM device. The image was built and the guest assertions passed
 under QEMU software emulation (TCG), including verified cleanup and clean VM exit.
-The committed sandboxed KVM runner still requires external verification.
+The user also confirmed that the sandboxed KVM Podman check passed on the host.
 The check does not exercise a model, the harness VM, a production broker service,
 paired VM networking, or an isolation evidence verifier.
 
@@ -965,7 +992,8 @@ exercises the same broker with its adapter and an actual container runtime.
 
 ## Run the harness
 
-The executable supports running one trial from the validated manifest:
+Inside the devcontainer, the executable supports running one trial from a
+validated manifest with reachable test endpoints:
 
 ```sh
 nix run .#harness -- run --manifest PATH > report.json
@@ -975,7 +1003,8 @@ It creates a current-thread Tokio runtime, constructs both HTTP clients using th
 manifest settings, and drives the existing async loop. Both endpoints must be
 reachable from wherever the executable runs. No retries or automatic restart are
 added. The intended deployment is the `harness` account inside the harness VM.
-Automatic harness startup is enabled only in the connected and paired smoke-test images.
+Automatic startup is supplied by the connected/paired smoke and local-trial
+image extensions. Use the sandboxed local runner for host-side experiments.
 
 The command writes one final JSON object followed by a newline to stdout.
 Operational errors before a report exists, or while writing it, go to stderr.
@@ -1020,7 +1049,9 @@ and commands. The final report schema is separate from the broker protocol.
 Reports are emitted only after the loop finishes; this is not a crash-recovery
 log. Output failure can leave a partial JSON document. Process termination can
 lose the report while a remote command continues; do not restart the same trial
-blindly. Run-wide history/report size limits and host-side collection are pending.
+blindly. The local VM runner collects the final report through the serial
+console, with a 1 MiB export limit. Aggregate in-process history limits and
+incremental crash-recovery output remain unimplemented.
 
 Run the executable integration tests locally with:
 
@@ -1075,14 +1106,12 @@ failures, and dependency unwinds at the loader boundaries return explicit errors
 
 ## Development container
 
-Copy these files into the new `thorough-but-unreliable` repository. Merge the flake outputs
-with that project's flake rather than replacing an existing application flake.
-This is a configuration proposal, not a deployed container.
-The Nixpkgs lock metadata is reused from the existing host repository. JSON,
-and Nix syntax checks passed, and the image derivation evaluated against
-the pinned revision. Image building and editor attachment still need validation.
+`.devcontainer/devcontainer.json` uses the development image built by this
+repository's flake and pinned inputs. Development is performed inside this
+container, including Rust tests, Nix evaluation, and non-VM package builds.
+Host-side experiment runners execute through sandboxed `nix build`.
 
-## Applied changes
+### Development image settings
 
 - Image reference: `localhost/thorough-but-unreliable-dev:latest`. Use the
   `latest` tag for now; rebuild, load and recreate after image changes.
@@ -1094,7 +1123,7 @@ the pinned revision. Image building and editor attachment still need validation.
 
 ## Build and load
 
-From the new repository root, on the host or designated builder with Nix and
+From the repository root, on the host or designated builder with Nix and
 rootless Podman:
 
 ```sh
@@ -1106,9 +1135,6 @@ Nix creates `result` as a symlink to the image archive in the Nix store. Podman
 loads that archive as `localhost/thorough-but-unreliable-dev:latest`, matching the
 devcontainer configuration. Then open or recreate the devcontainer in your
 editor; loading an image does not update an existing container.
-
-While building this proposal directly from its Git-ignored handoff directory,
-use `nix build "path:$PWD#devImage"` instead of `nix build .#devImage`.
 
 Repeat the build/load commands after image changes, then recreate the container.
 Build/load automation and image-identity recording are deferred. Run these
@@ -1151,7 +1177,8 @@ Credentials are created only at login, never baked into the image or Nix store.
 Other programs running as `dev` can read them; directory permissions do not
 isolate programs sharing that user. Do not attach this volume to runtime harness
 or experiment VMs. Treat backups as sensitive and manage retention explicitly.
-Volume initialization, ownership and login persistence still need runtime testing.
+Check volume ownership and login persistence when provisioning a new instance;
+rebuilding the image does not validate or modify an existing volume.
 
 ## Private Nix installation
 
@@ -1189,16 +1216,16 @@ nix develop --command bash --version
 ```
 
 Then perform a small package build and confirm the resulting path is registered
-in the private store. These are acceptance checks, not results already obtained.
+in the private store. These are checks for a new instance; package builds and
+Rust development already run in the current devcontainer.
 
-## Explicit remaining decisions
+## Deployment-specific checks and remaining work
 
 - Verify HTTPS with Nix, curl and the agent; some clients use their
   own certificate-discovery rules. Do not disable TLS verification.
-- Validate editor server requirements with this Nix userspace.
-  Host-distro library paths may not exist. This package
-  list is a baseline, not a claim that Zed/VS Code attachment was tested.
-- Codex is retained from the supplied example and pinned through Nixpkgs.
+- Check editor server requirements when changing editors or hosts; host-distro
+  library paths may not exist in this Nix userspace.
+- Codex is supplied by the pinned Nixpkgs revision.
   Only its dedicated state directory is persisted, not all of `/home/dev`.
 - Networking is the runtime default. It does not block host/LAN access. A
   dedicated host-managed network and policy are separate deployment work.
@@ -1209,5 +1236,5 @@ in the private store. These are acceptance checks, not results already obtained.
 - Add scoped cache volumes only when their benefit justifies persistence, then
   decide their retention and quotas.
 
-No host configuration or running development environment is changed by saving
-this proposal. Validate it with the chosen editor and rootless Podman before use.
+Editing these definitions does not update a running container. Rebuild, load,
+and recreate it to apply image changes.

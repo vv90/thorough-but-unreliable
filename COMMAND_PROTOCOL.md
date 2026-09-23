@@ -191,7 +191,11 @@ The user confirmed that sandboxed KVM check passed. The newer
 systemd cleanup through the VM's configured command address.
 `checks.x86_64-linux.paired-vm` connects a separate harness VM to that deployed
 broker over an isolated Ethernet stream, with fake inference, exact report
-verification, and orderly experiment shutdown. General physical-host trial
-supervision remains unimplemented. Runtime
-status preserves its uncertainty through this protocol, model-facing presentation,
-and the final harness report.
+verification, and orderly experiment shutdown. The sandboxed local runner in
+`nix/harness-local.nix` uses the same command path with real inference, selectable
+Podman targets, supplied manifests, and final report collection. The full real
+inference smoke run has passed on the host. See [EXPERIMENTS.md](EXPERIMENTS.md)
+for setup. Other target backends, general deployment supervision, and external
+isolation evidence verification remain unimplemented. Runtime status preserves
+its uncertainty through this protocol, model-facing presentation, and the final
+harness report.
