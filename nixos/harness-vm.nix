@@ -8,6 +8,7 @@
 
 {
   imports = [
+    ./harness-network.nix
     (modulesPath + "/profiles/minimal.nix")
     (modulesPath + "/profiles/qemu-guest.nix")
     (modulesPath + "/virtualisation/disk-image.nix")
@@ -21,47 +22,12 @@
   virtualisation.diskSize = 8192;
 
   networking.hostName = "harness";
-  networking.useNetworkd = true;
+  networking.useNetworkd = false;
   networking.useDHCP = false;
   networking.enableIPv6 = false;
   networking.nameservers = [ ];
   networking.firewall.enable = true;
   services.resolved.enable = false;
-  systemd.network.wait-online.enable = false;
-  systemd.network.links = {
-    "10-inference0" = {
-      matchConfig.MACAddress = "52:54:00:99:01:02";
-      linkConfig.Name = "inference0";
-    };
-    "10-command0" = {
-      matchConfig.MACAddress = "52:54:00:99:02:01";
-      linkConfig.Name = "command0";
-    };
-  };
-  systemd.network.networks = {
-    "20-inference0" = {
-      matchConfig.Name = "inference0";
-      networkConfig = {
-        Address = "10.99.1.2/24";
-        DHCP = false;
-        IPv6AcceptRA = false;
-        LinkLocalAddressing = false;
-        ConfigureWithoutCarrier = true;
-      };
-      linkConfig.RequiredForOnline = false;
-    };
-    "20-command0" = {
-      matchConfig.Name = "command0";
-      networkConfig = {
-        Address = "10.99.2.1/30";
-        DHCP = false;
-        IPv6AcceptRA = false;
-        LinkLocalAddressing = false;
-        ConfigureWithoutCarrier = true;
-      };
-      linkConfig.RequiredForOnline = false;
-    };
-  };
   boot.kernel.sysctl = {
     "net.ipv4.ip_forward" = 0;
     "net.ipv6.conf.all.forwarding" = 0;
@@ -125,9 +91,14 @@
   systemd.services.harness-network-readiness = {
     description = "Verify the harness network interfaces";
     wantedBy = [ "multi-user.target" ];
-    wants = [ "systemd-networkd.service" ];
-    after = [ "systemd-networkd.service" ];
+    requires = [ "harness-network-setup.service" ];
+    after = [ "harness-network-setup.service" ];
     script = ''
+      config=/run/harness-network/config.json
+      inference_address="$(${pkgs.jq}/bin/jq -r .inference.address "$config")"
+      command_address="$(${pkgs.jq}/bin/jq -r .command.address "$config")"
+      expected_inference_mac="$(${pkgs.jq}/bin/jq -r .inference.mac "$config")"
+      expected_command_mac="$(${pkgs.jq}/bin/jq -r .command.mac "$config")"
       address_present() {
         ${pkgs.iproute2}/bin/ip -4 -o address show dev "$1" \
           | ${pkgs.gnugrep}/bin/grep -Fq " inet $2 "
@@ -135,8 +106,8 @@
 
       addresses_ready=false
       for _ in $(${pkgs.coreutils}/bin/seq 1 50); do
-        if address_present inference0 10.99.1.2/24 \
-          && address_present command0 10.99.2.1/30; then
+        if address_present inference0 "$inference_address" \
+          && address_present command0 "$command_address"; then
           addresses_ready=true
           break
         fi
@@ -151,11 +122,11 @@
 
       inference_mac="$(cat /sys/class/net/inference0/address)"
       command_mac="$(cat /sys/class/net/command0/address)"
-      if test "$inference_mac" != "52:54:00:99:01:02"; then
+      if test "$inference_mac" != "$expected_inference_mac"; then
         echo "harness network: unexpected inference0 MAC $inference_mac" >&2
         exit 1
       fi
-      if test "$command_mac" != "52:54:00:99:02:01"; then
+      if test "$command_mac" != "$expected_command_mac"; then
         echo "harness network: unexpected command0 MAC $command_mac" >&2
         exit 1
       fi
@@ -186,7 +157,7 @@
         exit 1
       fi
 
-      echo "harness network: inference0=10.99.1.2/24 command0=10.99.2.1/30 default-route=none dns=none"
+      echo "harness network: inference0=$inference_address command0=$command_address default-route=none dns=none"
     '';
     serviceConfig = {
       Type = "oneshot";

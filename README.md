@@ -18,8 +18,8 @@ legacy BIOS/GRUB boot, an 8 GiB virtual disk, and diagnostics on serial port 0
 at 115200 baud. Login is locked and DHCP, IPv6 and forwarding are disabled. A
 noninteractive `harness` service account owns `/var/lib/harness`; a boot-time
 readiness unit verifies its fixed UID/GID and state-directory access.
-The two MAC-matched interfaces use fixed addresses with no default route or
-DNS. The image contains the Rust `harness` binary; its boot-time configuration
+The two MAC-matched interfaces use static addresses with no default route or
+DNS; their MACs and addresses can be supplied at boot. The image contains the Rust `harness` binary; its boot-time configuration
 unit validates the per-run manifest. The base image does not start a trial
 automatically. The runnable image adds startup, report handling, and shutdown
 through `nixos/harness-run.nix`; both smoke images reuse that module.
@@ -116,6 +116,43 @@ still running. The image derivation evaluates against the pinned Nixpkgs
 revision; repeat this smoke test after rebuilding the image.
 
 ### Test per-run configuration media
+
+#### Optional boot network configuration
+
+Place `network.json` next to `manifest.json` in the `HARNESS_CONFIG` ISO to
+override the harness NIC MACs and static IPv4 addresses without rebuilding the
+image. For example:
+
+```json
+{
+  "version": 1,
+  "inference": { "mac": "52:54:00:10:01:02", "address": "192.168.40.2/24" },
+  "command": { "mac": "52:54:00:10:02:01", "address": "192.168.50.1/30" }
+}
+```
+
+1. Set the VM's two NIC MACs to these values and attach each to its intended
+   network. The guest names them `inference0` and `command0`, regardless of PCI order.
+2. Configure the inference gateway and command peer on their respective subnets,
+   and set the corresponding URLs in `manifest.json`. This file configures only
+   the harness; it does not configure peers, host networking, or isolation policy.
+3. Include both JSON files when creating the ISO using the command below, then
+   boot a fresh writable overlay. The serial readiness message shows the selected
+   addresses. The network setup service must succeed before the trial can start.
+
+Without `network.json`, the existing MACs and addresses shown above apply.
+An existing but invalid file fails startup rather than falling back. The format
+requires exactly these fields, version 1, distinct nonzero unicast MACs, and
+non-overlapping IPv4 subnets with host addresses and prefixes from 1 through 30.
+Loopback, link-local, multicast, and reserved high IPv4 addresses are rejected.
+The file is limited to 4096 bytes. Unknown or duplicate fields are rejected.
+DHCP, DNS, IPv6, forwarding, and default routes remain disabled; exactly two
+non-loopback NICs are required. Configuration is validated before changing NICs.
+
+The existing smoke and local-run scripts keep their fixed topology and omit this
+optional file. Custom deployments must provide their own matching NIC/peer wiring.
+
+#### Create the configuration ISO
 
 Create a run manifest and place it in an ISO labeled `HARNESS_CONFIG`:
 

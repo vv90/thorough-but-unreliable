@@ -49,7 +49,19 @@ before shared report export/shutdown. The local runner directly uses harness-run
 the old nixos/harness-local.nix override was removed. Serial completion markers
 are harness run: COMPLETE/FAIL. COMPLETE requires successful report export but
 does not grade the task. The runnable image accepts recorded non-submission
-outcomes and still requires fresh disposable overlays and the existing networks.
+outcomes and still requires fresh disposable overlays.
+
+Harness boot networking now accepts optional network.json beside manifest.json
+on the HARNESS_CONFIG ISO. Version 1 selects MAC and static IPv4 CIDR for the
+inference and command roles; omission preserves the previous defaults. Pure
+Rust validation lives in src/network.rs, with bounded file IO in the
+harness-network-config binary. nixos/harness-network.nix applies it after udev
+settles and media mounting, before readiness and trial startup; networkd is
+disabled in the harness. Invalid files fail closed. There are still exactly two
+NICs, no DHCP/DNS/default route/IPv6/forwarding, and disjoint subnets. The existing
+launchers and experiment image retain their fixed topology; custom deployments
+must configure matching peers and manifest URLs themselves. Host VM verification
+of this new boot configuration is still needed.
 
 Limits: 720 seconds for the guest trial, 120 seconds for report export service,
 900 seconds for harness VM supervision, 1200 seconds for paired experiment
