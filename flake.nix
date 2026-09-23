@@ -181,6 +181,10 @@
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
         harness-run-image = self.nixosConfigurations.harness-run.config.system.build.image;
+        harness-deployment-bundle = import ./nix/harness-deployment-bundle.nix {
+          inherit pkgs harnessPackage;
+          harnessImage = self.packages.${system}.harness-run-image;
+        };
         experiment-image = self.nixosConfigurations.experiment.config.system.build.image;
         harness-paired-smoke-image =
           self.nixosConfigurations.harness-paired-smoke.config.system.build.image;
@@ -248,6 +252,9 @@
       };
 
       checks.${system} = {
+        harness-deployment-bundle = import ./nix/check-harness-deployment-bundle.nix {
+          inherit pkgs harnessPackage;
+        };
         config-repair = (import ./targets/podman/config-repair.nix { inherit pkgs; }).check;
         paired-vm-custom-network = self.checks.${system}.paired-vm.overrideAttrs (_: {
           pname = "paired-vm-custom-network";

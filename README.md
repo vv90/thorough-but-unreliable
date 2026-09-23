@@ -8,6 +8,35 @@ See [EXPERIMENTS.md](EXPERIMENTS.md) for the experiment setup procedure. This
 README remains the source of truth for build/run commands and runtime limits.
 [COMMAND_PROTOCOL.md](COMMAND_PROTOCOL.md) specifies the command API, and
 [IMPLEMENTATION.md](IMPLEMENTATION.md) contains implementation rules.
+[DEPLOYMENT.md](DEPLOYMENT.md) describes deploying the standalone harness bundle
+on another machine, including the responsibilities of an isolated launcher.
+
+## Portable deployment bundle
+
+Build on the external KVM builder:
+
+```sh
+nix build --option sandbox true --builders '' -L \
+  .#harness-deployment-bundle --out-link result-harness-deployment
+```
+
+Transfer `result-harness-deployment/harness-deployment.tar.gz` and its sibling
+`SHA256SUMS`, rather than the result symlink. The archive contains the standalone
+`harness-run.qcow2`, example manifest/network JSON files, deployment instructions,
+the README and command protocol, build metadata, and checksums. It contains no
+runtime symlinks into the builder's Nix store. Nix is not required on the
+destination to boot the image; the launcher must provide isolated execution,
+the two reachable services, fresh media, and serial capture as described in
+[DEPLOYMENT.md](DEPLOYMENT.md). No launcher or experiment image is bundled.
+
+The packaging check uses a small non-bootable QCOW2 fixture, validates the shipped
+examples with the real harness binaries, and verifies archive contents and
+checksums without KVM:
+
+```sh
+nix build --option sandbox true --builders '' -L \
+  .#checks.x86_64-linux.harness-deployment-bundle
+```
 
 ## Harness base image
 

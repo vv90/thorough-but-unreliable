@@ -78,6 +78,21 @@ command bytes, and 64 KiB capture per stream. No automatic retries.
 
 ## Running and defining experiments
 
+Portable packaging: packages.x86_64-linux.harness-deployment-bundle produces
+harness-deployment.tar.gz plus SHA256SUMS. It copies the standalone runnable
+QCOW2, hello manifest, deployment/network.json, DEPLOYMENT.md, README and command
+protocol, provenance metadata, and inner checksums into a self-contained archive.
+The matching non-KVM check uses a tiny fixture disk and the real config validators
+to test packaging. DEPLOYMENT.md specifies destination media, endpoint/network,
+isolated launcher, report, and cleanup responsibilities. No launcher or experiment
+image is bundled; non-Nix destination launchers remain deployment-specific work.
+Validation: Nix evaluation, formatting, and rendered-shell checks passed. The
+rendered packaging/check scripts passed in a devcontainer temporary directory
+with a fixture QCOW2 and existing local harness validators (checksums, byte
+comparisons, no symlinks). The full Nix packaging check failed before packaging
+on cache.nixos.org dependency download timeouts; its stalled retry was stopped.
+The real-image bundle build and deployment boot still require host verification.
+
 Host commands:
 
 - Strict real-inference smoke: bash scripts/run-harness-local.sh
