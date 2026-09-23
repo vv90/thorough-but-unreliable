@@ -1,5 +1,4 @@
 {
-  harnessPackage,
   lib,
   pkgs,
   connectedExpectedReport,
@@ -11,50 +10,18 @@ let
   expectedReport = connectedExpectedReport;
 in
 {
-  # Opt-in test image only. The base image never launches a trial at boot.
+  imports = [ ./harness-run.nix ];
   image.baseName = lib.mkForce connectedImageName;
 
-  systemd.services.harness-run = {
-    description = "Run the connected harness smoke trial";
-    wantedBy = [ "multi-user.target" ];
-    requires = [
-      "harness-readiness.service"
-      "harness-network-readiness.service"
-      "harness-config-check.service"
-      "run-harness\\x2dconfig.mount"
-    ];
-    after = [
-      "harness-readiness.service"
-      "harness-network-readiness.service"
-      "harness-config-check.service"
-      "run-harness\\x2dconfig.mount"
-    ];
-    script = ''
-      # Never overwrite an earlier trial's report on restart or reused disks.
-      set -C
-      exec ${harnessPackage}/bin/harness run \
-        --manifest /run/harness-config/manifest.json \
-        > /var/lib/harness/report.json
-    '';
-    serviceConfig = {
-      Type = "oneshot";
-      User = "harness";
-      Group = "harness";
-      StateDirectory = "harness";
-      StateDirectoryMode = "0700";
-      UMask = "0077";
-      Restart = "no";
-      RemainAfterExit = true;
-      TimeoutStartSec = 60;
-      StandardOutput = "journal+console";
-      StandardError = "journal+console";
-    };
+  systemd.services.harness-run.serviceConfig.TimeoutStartSec = 60;
+  systemd.services.harness-result = {
+    wants = [ "harness-connected-smoke-result.service" ];
+    after = [ "harness-connected-smoke-result.service" ];
   };
 
   # Wants rather than Requires: also run the verifier when the trial failed.
   systemd.services.harness-connected-smoke-result = {
-    description = "Check the connected smoke report and shut down";
-    wantedBy = [ "multi-user.target" ];
+    description = "Check the connected smoke report";
     wants = [ "harness-run.service" ];
     after = [ "harness-run.service" ];
     script = ''
@@ -67,7 +34,6 @@ in
       else
         echo 'harness connected smoke: FAIL' >&2
       fi
-      ${pkgs.systemd}/bin/systemctl --no-block poweroff
     '';
     serviceConfig = {
       Type = "oneshot";

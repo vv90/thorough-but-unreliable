@@ -114,6 +114,15 @@
         modules = [ ./nixos/harness-vm.nix ];
       };
 
+      nixosConfigurations.harness-run = nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs = { inherit harnessPackage; };
+        modules = [
+          ./nixos/harness-vm.nix
+          ./nixos/harness-run.nix
+        ];
+      };
+
       nixosConfigurations.harness-connected-smoke = nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {
@@ -171,6 +180,7 @@
       packages.${system} = {
         harness = harnessPackage;
         harness-image = self.nixosConfigurations.harness.config.system.build.image;
+        harness-run-image = self.nixosConfigurations.harness-run.config.system.build.image;
         experiment-image = self.nixosConfigurations.experiment.config.system.build.image;
         harness-paired-smoke-image =
           self.nixosConfigurations.harness-paired-smoke.config.system.build.image;

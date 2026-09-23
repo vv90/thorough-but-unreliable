@@ -38,10 +38,18 @@ The user selected optional global sandbox exposure of the socket for all builds,
 not per-derivation approval hooks. The socket is nginx:nixbld mode 0660 in a
 2750 directory; sandbox access and a real tool-call probe were confirmed.
 
-The base harness image only checks readiness/configuration. The local-trial
-extension runs the harness automatically, exports a bounded final JSON report
+The base harness image only checks readiness/configuration. The standalone
+harness-run-image uses nixos/harness-run.nix to run the harness automatically,
+export a bounded final JSON report
 over serial, and powers off. The runner then requests experiment shutdown and
 requires successful broker/target shutdown plus container/cgroup removal.
+
+Both smoke images import the same execution module and add fixture verification
+before shared report export/shutdown. The local runner directly uses harness-run;
+the old nixos/harness-local.nix override was removed. Serial completion markers
+are harness run: COMPLETE/FAIL. COMPLETE requires successful report export but
+does not grade the task. The runnable image accepts recorded non-submission
+outcomes and still requires fresh disposable overlays and the existing networks.
 
 Limits: 720 seconds for the guest trial, 120 seconds for report export service,
 900 seconds for harness VM supervision, 1200 seconds for paired experiment

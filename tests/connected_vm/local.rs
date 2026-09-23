@@ -166,7 +166,7 @@ pub(super) async fn drive_live(mut child: Child, directory: &Path, trial: &Trial
     )?;
     if !String::from_utf8_lossy(&console)
         .lines()
-        .any(|line| line == "harness local run: COMPLETE")
+        .any(|line| line == "harness run: COMPLETE")
     {
         return Err("guest run or report permissions failed".into());
     }
@@ -304,7 +304,7 @@ mod tests {
             std::fs::write(
                 &transcript,
                 format!(
-                    "{PREFIX}{}\nharness local run: COMPLETE\n",
+                    "{PREFIX}{}\nharness run: COMPLETE\n",
                     serde_json::to_string(&report)?
                 ),
             )?;
@@ -344,9 +344,9 @@ mod tests {
             let directory = artifact_directory().await?;
             let transcript = directory.join("input.txt");
             let marker = if completed {
-                "harness local run: COMPLETE"
+                "harness run: COMPLETE"
             } else {
-                "harness local run: FAIL"
+                "harness run: FAIL"
             };
             std::fs::write(
                 &transcript,

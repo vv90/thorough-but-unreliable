@@ -21,8 +21,29 @@ readiness unit verifies its fixed UID/GID and state-directory access.
 The two MAC-matched interfaces use fixed addresses with no default route or
 DNS. The image contains the Rust `harness` binary; its boot-time configuration
 unit validates the per-run manifest. The base image does not start a trial
-automatically. The connected smoke and local-trial image extensions add startup,
-report handling, and shutdown services.
+automatically. The runnable image adds startup, report handling, and shutdown
+through `nixos/harness-run.nix`; both smoke images reuse that module.
+
+Build the standalone runnable image with:
+
+```sh
+nix build .#harness-run-image
+```
+
+The output is `result/harness-run.qcow2`. It is independent of the selected
+target, trial manifest, and host inference socket. At launch, provide a fresh
+writable overlay, the `HARNESS_CONFIG` ISO containing `manifest.json`, the two
+MAC-matched networks described below, and serial port 0 capture. The existing
+sandboxed local runner now uses this image directly.
+
+The trial runs once with a 720-second deadline. Its final report (up to 1 MiB)
+is exported as a `HARNESS_REPORT:` JSON line, followed by `harness run: COMPLETE`
+or `harness run: FAIL`, then the VM powers off. COMPLETE means a report was
+exported with the expected ownership and the execution service completed;
+it does not mean the task succeeded. Recorded non-submission outcomes are
+accepted. Missing or invalid reports and export failures cannot produce COMPLETE.
+The result service has a 120-second deadline. Host supervision must still bound
+the VM lifetime and handle missing output or stalled shutdown.
 
 The custom Rust loop calls an OpenAI-compatible inference endpoint, exposes
 `execute_target_command` and `submit` to the model, and sends commands through
@@ -234,15 +255,16 @@ broker returns predetermined `smoke\n` output, and inference receives that resul
 and submits. No shell command is executed by the fake broker. The guest saves
 `/var/lib/harness/report.json` as UID/GID 900 with mode 0600. A test-only verifier
 checks the complete report against `tests/fixtures/connected-report.json`, prints
-`harness connected smoke: PASS` or `FAIL`, and powers the VM off.
+`harness connected smoke: PASS` or `FAIL`. The shared result service then exports
+the report to serial and powers the VM off.
 
 The test requires successful QEMU exit, the guest PASS marker, and the exact
 HTTP exchange without missing/extra requests. It fails after 180 seconds, kills
 and reaps a stalled VM, and retains `console.log`, `stderr.log`, the ISO and overlay
 for inspection. Successful builds publish these under
 `result-harness-connected-smoke/artifacts/`; failed builds retain them in the
-build directory printed by Nix. The report remains inside the overlay; automatic
-report extraction is not added. Service startup is bounded to 60 seconds with no
+build directory printed by Nix. The report remains inside the overlay and is
+also exported in the serial log. Service startup is bounded to 60 seconds with no
 restart; an existing report is never overwritten. Each test creates a fresh overlay.
 
 Ordinary `cargo test` inside the devcontainer checks these same fixtures against
@@ -1003,8 +1025,9 @@ It creates a current-thread Tokio runtime, constructs both HTTP clients using th
 manifest settings, and drives the existing async loop. Both endpoints must be
 reachable from wherever the executable runs. No retries or automatic restart are
 added. The intended deployment is the `harness` account inside the harness VM.
-Automatic startup is supplied by the connected/paired smoke and local-trial
-image extensions. Use the sandboxed local runner for host-side experiments.
+Automatic startup is supplied by `nixos/harness-run.nix`, shared by the standalone
+runnable image and both smoke images. Use the sandboxed local runner for
+host-side experiments.
 
 The command writes one final JSON object followed by a newline to stdout.
 Operational errors before a report exists, or while writing it, go to stderr.

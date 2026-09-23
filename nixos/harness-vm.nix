@@ -1,5 +1,6 @@
 {
   harnessPackage,
+  lib,
   modulesPath,
   pkgs,
   ...
@@ -13,7 +14,7 @@
   ];
 
   image = {
-    baseName = "harness";
+    baseName = lib.mkDefault "harness";
     format = "qcow2";
     efiSupport = false;
   };
