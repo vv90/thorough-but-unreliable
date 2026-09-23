@@ -877,6 +877,30 @@ Fixtures live in `tests/fixtures/paired-{manifest,report}.json`; the runner is
 `tests/connected_vm/paired.rs`. The ordinary harness image still does not start
 trials automatically.
 
+#### Verify custom boot networking
+
+Run on the KVM host:
+
+```sh
+nix build --option sandbox true --builders '' --keep-failed -L \
+  .#checks.x86_64-linux.paired-vm-custom-network \
+  --out-link result-paired-vm-custom-network
+```
+
+This uses the **same harness image** as `paired-vm`, with a `network.json` on
+the configuration ISO selecting inference `192.168.40.2/24` and command
+`192.168.50.1/30`. The harness MACs are `52:54:00:10:01:02` and
+`52:54:00:10:02:01`. A matching experiment image listens at
+`192.168.50.2:8080` using MAC `52:54:00:10:02:02`; fake inference is forwarded
+at `192.168.40.1:11434`. The manifest uses those alternate endpoints.
+
+The test requires the custom-address readiness message, the same exact
+model/tool exchange and report as the default paired test, successful report
+export, and clean experiment shutdown including target cleanup. It needs no
+real model or host inference socket. Logs, both configuration files, ISO, and
+overlays are retained under `result-paired-vm-custom-network/artifacts/`.
+Invalid-configuration boot cases are not part of this check.
+
 This proves the functional path from the harness through the broker to the
 container and back, plus orderly cleanup. It does not connect to Ollama or
 establish an isolation verdict. Authentication remains deferred.

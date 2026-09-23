@@ -6,7 +6,85 @@ use tokio::net::UnixStream;
 
 const PAIRED_MANIFEST: &str = include_str!("../fixtures/paired-manifest.json");
 const PAIRED_REPORT: &str = include_str!("../fixtures/paired-report.json");
-const READY: &str = "experiment broker: ready listen=10.99.2.2:8080";
+
+#[derive(Clone, Copy)]
+enum NetworkLayout {
+    Default,
+    Custom,
+}
+
+impl NetworkLayout {
+    fn inference_subnet(self) -> &'static str {
+        match self {
+            Self::Default => "10.99.1",
+            Self::Custom => "192.168.40",
+        }
+    }
+    fn command_subnet(self) -> &'static str {
+        match self {
+            Self::Default => "10.99.2",
+            Self::Custom => "192.168.50",
+        }
+    }
+    fn mac_prefix(self) -> &'static str {
+        match self {
+            Self::Default => "52:54:00:99",
+            Self::Custom => "52:54:00:10",
+        }
+    }
+    fn readiness(self) -> String {
+        format!(
+            "harness network: inference0={}.2/24 command0={}.1/30 default-route=none dns=none",
+            self.inference_subnet(),
+            self.command_subnet()
+        )
+    }
+    fn config(self) -> Value {
+        json!({
+            "version": 1,
+            "inference": {"mac": format!("{}:01:02", self.mac_prefix()), "address": format!("{}.2/24", self.inference_subnet())},
+            "command": {"mac": format!("{}:02:01", self.mac_prefix()), "address": format!("{}.1/30", self.command_subnet())}
+        })
+    }
+    fn manifest(self) -> TestResult<String> {
+        let mut manifest: Value = serde_json::from_str(PAIRED_MANIFEST)?;
+        for (path, value) in [
+            (
+                "/inference/completion_url",
+                format!(
+                    "http://{}.1:11434/v1/chat/completions",
+                    self.inference_subnet()
+                ),
+            ),
+            (
+                "/command/command_url",
+                format!("http://{}.2:8080/v1/command", self.command_subnet()),
+            ),
+        ] {
+            *manifest
+                .pointer_mut(path)
+                .ok_or("missing fixture endpoint")? = Value::String(value);
+        }
+        Ok(serde_json::to_string_pretty(&manifest)?)
+    }
+}
+
+#[test]
+fn network_layout_fixtures_are_valid_and_defaults_unchanged() -> TestResult {
+    assert_eq!(
+        serde_json::from_str::<Value>(&NetworkLayout::Default.manifest()?)?,
+        serde_json::from_str::<Value>(PAIRED_MANIFEST)?
+    );
+    for layout in [NetworkLayout::Default, NetworkLayout::Custom] {
+        thorough_but_unreliable::network::Network::parse(&serde_json::to_vec(&layout.config())?)?;
+        thorough_but_unreliable::manifest::Manifest::from_slice(layout.manifest()?.as_bytes())?;
+    }
+    assert_ne!(
+        NetworkLayout::Default.config(),
+        NetworkLayout::Custom.config()
+    );
+    Ok(())
+}
 
 #[path = "local.rs"]
 mod local;
@@ -68,7 +146,7 @@ async fn capture(
     mut stream: impl AsyncRead + Unpin,
     bytes: &mut Vec<u8>,
     limit: usize,
-    mut ready: Option<oneshot::Sender<()>>,
+    mut ready: Option<(oneshot::Sender<()>, &str)>,
 ) -> TestResult {
     let mut chunk = [0u8; 4096];
     loop {
@@ -82,11 +160,11 @@ async fn capture(
         }
         bytes.try_reserve(count)?;
         bytes.extend_from_slice(chunk.get(..count).ok_or("invalid read size")?);
-        if ready.is_some()
-            && bytes
-                .windows(READY.len())
-                .any(|part| part == READY.as_bytes())
-            && let Some(sender) = ready.take()
+        if ready.as_ref().is_some_and(|(_, marker)| {
+            bytes
+                .windows(marker.len())
+                .any(|part| part == marker.as_bytes())
+        }) && let Some((sender, _)) = ready.take()
         {
             sender
                 .send(())
@@ -102,6 +180,7 @@ async fn experiment(
     stop: oneshot::Receiver<()>,
     monitor: &Path,
     deadline: Duration,
+    network: NetworkLayout,
 ) -> TestResult {
     let mut console = Vec::new();
     let mut stderr = Vec::new();
@@ -117,9 +196,13 @@ async fn experiment(
             Ok::<_, TestError>(())
         };
         let wait = async { Ok::<_, TestError>(child.wait().await?) };
+        let marker = format!(
+            "experiment broker: ready listen={}.2:8080",
+            network.command_subnet()
+        );
         let (status, (), (), ()) = tokio::try_join!(
             wait,
-            capture(out, &mut console, 4194304, Some(ready)),
+            capture(out, &mut console, 4194304, Some((ready, &marker))),
             capture(err, &mut stderr, 65536, None),
             shutdown,
         )?;
@@ -204,7 +287,17 @@ async fn paired_vm_smoke() -> TestResult {
     run(Inference::Scripted).await
 }
 
+#[tokio::test]
+#[ignore = "requires KVM; use the sandboxed Nix paired-vm-custom-network check"]
+async fn paired_vm_custom_network() -> TestResult {
+    run_with_network(Inference::Scripted, NetworkLayout::Custom).await
+}
+
 async fn run(inference_mode: Inference) -> TestResult {
+    run_with_network(inference_mode, NetworkLayout::Default).await
+}
+
+async fn run_with_network(inference_mode: Inference, network: NetworkLayout) -> TestResult {
     let deadline = Duration::from_secs(match &inference_mode {
         Inference::Scripted => 360,
         Inference::Local { .. } => 1200,
@@ -221,10 +314,15 @@ async fn run(inference_mode: Inference) -> TestResult {
     let config = directory.join("config");
     std::fs::create_dir(&config)?;
     let manifest = match &inference_mode {
-        Inference::Scripted => PAIRED_MANIFEST.to_owned(),
+        Inference::Scripted => network.manifest()?,
         Inference::Local { trial, .. } => trial.manifest().to_owned(),
     };
     std::fs::write(config.join("manifest.json"), manifest)?;
+    if let NetworkLayout::Custom = network {
+        let bytes = serde_json::to_vec_pretty(&network.config())?;
+        thorough_but_unreliable::network::Network::parse(&bytes)?;
+        std::fs::write(config.join("network.json"), bytes)?;
+    }
     let iso = directory.join("harness-config.iso");
     let mut mkiso = Command::new("xorrisofs");
     mkiso
@@ -251,10 +349,10 @@ async fn run(inference_mode: Inference) -> TestResult {
         "stream,id=command,server=on,addr.type=unix,addr.path={}",
         link.display()
     ));
-    experiment_command.args([
-        "-device",
-        "virtio-net-pci,netdev=command,mac=52:54:00:99:02:02",
-    ]);
+    experiment_command.arg("-device").arg(format!(
+        "virtio-net-pci,netdev=command,mac={}:02:02",
+        network.mac_prefix()
+    ));
 
     let inference = TcpListener::bind("127.0.0.1:0").await?;
     // Unconnected sentinel: the script rejects any accidental fake-broker use.
@@ -273,17 +371,18 @@ async fn run(inference_mode: Inference) -> TestResult {
         "stream,id=command,server=off,addr.type=unix,addr.path={}",
         link.display()
     ));
-    harness_command.args([
-        "-device",
-        "virtio-net-pci,netdev=command,mac=52:54:00:99:02:01",
-    ]);
-    harness_command.arg("-netdev").arg(format!(
-        "user,id=inference,net=10.99.1.0/24,host=10.99.1.254,dns=10.99.1.253,ipv6=off,restrict=on,guestfwd=tcp:10.99.1.1:11434-cmd:{forward}"
+    harness_command.arg("-device").arg(format!(
+        "virtio-net-pci,netdev=command,mac={}:02:01",
+        network.mac_prefix()
     ));
-    harness_command.args([
-        "-device",
-        "virtio-net-pci,netdev=inference,mac=52:54:00:99:01:02",
-    ]);
+    let subnet = network.inference_subnet();
+    harness_command.arg("-netdev").arg(format!(
+        "user,id=inference,net={subnet}.0/24,host={subnet}.254,dns={subnet}.253,ipv6=off,restrict=on,guestfwd=tcp:{subnet}.1:11434-cmd:{forward}"
+    ));
+    harness_command.arg("-device").arg(format!(
+        "virtio-net-pci,netdev=inference,mac={}:01:02",
+        network.mac_prefix()
+    ));
     let exchanges = inference_script()?;
     let (ready, readiness) = oneshot::channel();
     let (stop, stopped) = oneshot::channel();
@@ -306,6 +405,9 @@ async fn run(inference_mode: Inference) -> TestResult {
             if !output.status.success()
                 || !console.contains("harness connected smoke: PASS")
                 || console.contains("harness connected smoke: FAIL")
+                || !console.contains(&network.readiness())
+                || !console.contains("harness run: COMPLETE")
+                || console.contains("harness run: FAIL")
             {
                 return Err("harness did not verify the paired report; see harness logs".into());
             }
@@ -317,7 +419,15 @@ async fn run(inference_mode: Inference) -> TestResult {
         result
     };
     let (experiment_result, harness_result) = tokio::join!(
-        experiment(child, &experiment_dir, ready, stopped, &monitor, deadline),
+        experiment(
+            child,
+            &experiment_dir,
+            ready,
+            stopped,
+            &monitor,
+            deadline,
+            network
+        ),
         run_harness,
     );
     // Nix outputs contain regular artifacts, not stale control/network sockets.

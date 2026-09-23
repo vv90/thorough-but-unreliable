@@ -249,6 +249,25 @@
 
       checks.${system} = {
         config-repair = (import ./targets/podman/config-repair.nix { inherit pkgs; }).check;
+        paired-vm-custom-network = self.checks.${system}.paired-vm.overrideAttrs (_: {
+          pname = "paired-vm-custom-network";
+          # Deliberately inherit the identical harness image from paired-vm.
+          # Only the experiment peer needs a different built-in configuration.
+          EXPERIMENT_IMAGE = "${
+            (self.nixosConfigurations.experiment.extendModules {
+              specialArgs.experimentCommandNetwork = {
+                address = "192.168.50.2";
+                prefix = 30;
+                mac = "52:54:00:10:02:02";
+              };
+            }).config.system.build.image
+          }/experiment.qcow2";
+          cargoTestFlags = [
+            "--test"
+            "connected_vm"
+            "paired::paired_vm_custom_network"
+          ];
+        });
         paired-vm = self.checks.${system}.harness-connected-smoke.overrideAttrs (_: {
           pname = "paired-vm-smoke";
           HARNESS_SMOKE_IMAGE = "${

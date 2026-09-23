@@ -4,6 +4,11 @@
   lib,
   harnessPackage,
   targetEnvironment,
+  experimentCommandNetwork ? {
+    address = "10.99.2.2";
+    prefix = 30;
+    mac = "52:54:00:99:02:02";
+  },
   ...
 }:
 let
@@ -13,7 +18,7 @@ let
       targetEnvironment.command
       // {
         version = 1;
-        listen = "10.99.2.2:8080";
+        listen = "${experimentCommandNetwork.address}:8080";
         socket_path = "/run/podman/podman.sock";
         command_bytes = 4096;
         runtime_json_bytes = 65536;
@@ -60,13 +65,13 @@ in
   };
   systemd.network.wait-online.enable = false;
   systemd.network.links."10-command0" = {
-    matchConfig.MACAddress = "52:54:00:99:02:02";
+    matchConfig.MACAddress = experimentCommandNetwork.mac;
     linkConfig.Name = "command0";
   };
   systemd.network.networks."20-command0" = {
     matchConfig.Name = "command0";
     networkConfig = {
-      Address = "10.99.2.2/30";
+      Address = "${experimentCommandNetwork.address}/${toString experimentCommandNetwork.prefix}";
       DHCP = false;
       IPv6AcceptRA = false;
       LinkLocalAddressing = false;
@@ -100,7 +105,7 @@ in
       # another interface or falling back to a wildcard listener.
       ready=false
       for _ in $(seq 1 30); do
-        if ip -j -4 address show dev command0 | jq -e 'any(.[].addr_info[]; .local == "10.99.2.2" and .prefixlen == 30)' > /dev/null; then
+        if ip -j -4 address show dev command0 | jq -e 'any(.[].addr_info[]; .local == "${experimentCommandNetwork.address}" and .prefixlen == ${toString experimentCommandNetwork.prefix})' > /dev/null; then
           ready=true
           break
         fi

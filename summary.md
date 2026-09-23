@@ -61,7 +61,13 @@ disabled in the harness. Invalid files fail closed. There are still exactly two
 NICs, no DHCP/DNS/default route/IPv6/forwarding, and disjoint subnets. The existing
 launchers and experiment image retain their fixed topology; custom deployments
 must configure matching peers and manifest URLs themselves. Host VM verification
-of this new boot configuration is still needed.
+of the default layout passed. The new paired-vm-custom-network Nix check tests
+alternate MACs and 192.168.40.2/24 + 192.168.50.1/30 addresses using exactly the
+same harness image as paired-vm. Only the experiment peer image is configured
+differently, via experimentCommandNetwork in experiment-service.nix. The check
+supplies network.json and alternate manifest URLs, uses scripted inference,
+and requires custom readiness, the exact report, successful export, and clean
+experiment shutdown. Its host KVM run is still needed.
 
 Limits: 720 seconds for the guest trial, 120 seconds for report export service,
 900 seconds for harness VM supervision, 1200 seconds for paired experiment
