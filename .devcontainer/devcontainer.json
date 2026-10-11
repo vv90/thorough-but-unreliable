@@ -17,5 +17,6 @@
     "--memory=8g",
     "--memory-swap=10g",
     "--tmpfs=/tmp:rw,nosuid,nodev,size=2g,mode=1777",
+    "--name=thorough-but-unreliable-dev",
   ],
 }
