@@ -387,9 +387,13 @@ Model failures and command-client failures have distinct typed categories and
 optional diagnostics. Failure to obtain a valid broker report is distinct from a
 report describing failed target execution. These failures terminate immediately
 without retries, preserving uncertainty and the completed transcript.
-One submission finishes with its answer; multiple
-submissions or a mixture of submission and commands are protocol errors. A
-response with no tool calls ends as early termination.
+One submission finishes with its answer. Malformed arguments, unknown tools,
+empty or duplicate call IDs, multiple submissions, and mixed submission/command
+batches receive correction feedback. No tools in a rejected batch execute.
+The rejected response is retained in the report and quoted in a user-role feedback
+message to the model, avoiding invalid tool-call history. Each correction consumes
+a model turn; repeated mistakes end at the turn limit. A response with no tool
+calls ends as early termination.
 
 The turn budget bounds model calls. Zero permits no calls; commands in the last
 allowed response finish while the target remains usable, before the budget
@@ -457,8 +461,10 @@ covers response body reads too. These bounds do not replace run-wide limits.
 Responses must contain one assistant choice at index zero, with a supported
 finish reason and well-formed function calls. Tool argument objects require
 exactly `command` or `answer`; IDs must be nonempty and unique per response.
-Unknown tools, malformed JSON, and token-truncated responses return errors.
-Submission/command combinations remain a decision for the pure loop. Transport
+Unknown tools and invalid argument JSON become rejected calls for the pure loop
+to return as correction feedback. Malformed response envelopes and token-truncated
+responses remain terminal errors. Submission/command combinations remain a decision
+for the pure loop. Transport
 errors preserve the possibility that inference already completed; no request
 is retried automatically.
 Conversion to `ModelFailure` retains typed HTTP status, invalid response,

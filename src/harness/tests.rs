@@ -539,26 +539,26 @@ proptest! {
         answer in text(), kind in 0u8..4, invalid_first in any::<bool>(),
     ) {
         let mut response = commands(&values);
-        let (bad_call, expected_error) = match kind {
-            0 => (ToolCall { id: String::new(), tool: Tool::ExecuteTargetCommand { command: answer } }, ProtocolError::EmptyCallId),
-            1 => (ToolCall { id: "call-0".into(), tool: Tool::ExecuteTargetCommand { command: answer } }, ProtocolError::DuplicateCallId("call-0".into())),
-            2 => (ToolCall { id: "submit".into(), tool: Tool::Submit { answer } }, ProtocolError::MixedSubmissionAndCommands),
+        let bad_call = match kind {
+            0 => ToolCall { id: String::new(), tool: Tool::ExecuteTargetCommand { command: answer } },
+            1 => ToolCall { id: "call-0".into(), tool: Tool::ExecuteTargetCommand { command: answer } },
+            2 => ToolCall { id: "submit".into(), tool: Tool::Submit { answer } },
             _ => {
                 response = submission("first".into());
-                (ToolCall { id: "second-submit".into(), tool: Tool::Submit { answer } }, ProtocolError::MultipleSubmissions)
+                ToolCall { id: "second-submit".into(), tool: Tool::Submit { answer } }
             }
         };
         response.tool_calls.push(bad_call);
         if invalid_first {
             response.tool_calls.reverse();
         }
-        let mut model = ScriptedModel { responses: VecDeque::from([Ok(response.clone())]), ..Default::default() };
+        let mut model = ScriptedModel { responses: VecDeque::from([Ok(response.clone()), Ok(submission("corrected".into()))]), ..Default::default() };
         let mut executor = ScriptedExecutor::default();
         let report = run("system".into(), "task".into(), 10, &mut model, &mut executor);
-        prop_assert_eq!(report.outcome, RunOutcome::ProtocolError(expected_error));
+        prop_assert_eq!(report.outcome, RunOutcome::Submitted { answer: "corrected".into() });
         prop_assert!(executor.calls.is_empty());
-        prop_assert_eq!(model.histories.len(), 1);
-        prop_assert_eq!(report.history.last(), Some(&Message::Assistant(response)));
+        prop_assert_eq!(model.histories.len(), 2);
+        prop_assert!(report.history.iter().any(|message| matches!(message, Message::ToolCallCorrection { response: rejected, .. } if rejected == &response)), "expected correction feedback");
     }
 
     #[test]
@@ -667,5 +667,23 @@ proptest! {
         prop_assert_eq!(first_executor.calls, second_executor.calls);
         prop_assert_eq!(first.history, expected_history);
         prop_assert_eq!(first.outcome, RunOutcome::Submitted { answer });
+    }
+}
+
+proptest! {
+    #[test]
+    fn repeated_invalid_calls_are_bounded_by_model_turn_budget(budget in 0u32..16, arguments in text()) {
+        let response = AssistantResponse { text: None, tool_calls: vec![ToolCall {
+            id: "bad".into(), tool: Tool::Invalid { name: "unknown".into(), arguments, diagnostic: "Unknown tool".into() },
+        }] };
+        let mut model = ScriptedModel {
+            responses: (0..budget).map(|_| Ok(response.clone())).collect(), ..Default::default()
+        };
+        let mut executor = ScriptedExecutor::default();
+        let report = run("system".into(), "task".into(), budget, &mut model, &mut executor);
+        prop_assert_eq!(report.outcome, RunOutcome::ModelTurnLimit);
+        prop_assert_eq!(model.histories.len(), usize::try_from(budget)?);
+        prop_assert!(executor.calls.is_empty());
+        prop_assert_eq!(report.history.iter().filter(|m| matches!(m, Message::ToolCallCorrection { .. })).count(), usize::try_from(budget)?);
     }
 }

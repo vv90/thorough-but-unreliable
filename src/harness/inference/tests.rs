@@ -109,7 +109,7 @@ proptest! {
     }
 
     #[test]
-    fn malformed_argument_objects_never_produce_a_tool(value in text(), submit in any::<bool>(), kind in 0u8..5) {
+    fn malformed_argument_objects_never_produce_an_executable_tool(value in text(), submit in any::<bool>(), kind in 0u8..5) {
         let name = if submit { "submit" } else { "execute_target_command" };
         let key = if submit { "answer" } else { "command" };
         let args = match kind {
@@ -120,7 +120,8 @@ proptest! {
             _ => Value::Null,
         };
         let value = response(json!({"role":"assistant","tool_calls":[call("c", name, serde_json::to_string(&args)?)]}), "tool_calls");
-        prop_assert!(wire::decode_response(&serde_json::to_vec(&value)?).is_err());
+        let decoded = wire::decode_response(&serde_json::to_vec(&value)?)?;
+        prop_assert!(decoded.tool_calls.iter().all(|call| matches!(call.tool, Tool::Invalid { .. })), "expected correction feedback");
     }
 
     #[test]
@@ -128,7 +129,8 @@ proptest! {
         let name = format!("unsupported:{name}");
         let value = response(json!({"role":"assistant","tool_calls":[call("c", &name, "{}".into())]}), "tool_calls");
         let result = wire::decode_response(&serde_json::to_vec(&value)?);
-        prop_assert!(matches!(result, Err(InferenceError::UnsupportedTool(actual)) if actual == name));
+        let decoded = result?;
+        prop_assert!(decoded.tool_calls.iter().all(|call| matches!(&call.tool, Tool::Invalid { name: actual, .. } if actual == &name)), "expected correction feedback");
     }
 
     #[test]
@@ -164,16 +166,7 @@ fn rejects_malformed_envelopes_and_truncated_or_ambiguous_completions() -> TestR
         ("/choices/0/finish_reason", Value::Null),
         ("/choices/0/message", json!(["assistant", null, []])),
         ("/choices/0/message/tool_calls", json!([])),
-        ("/choices/0/message/tool_calls/0/id", json!("")),
         ("/choices/0/message/tool_calls/0/type", json!("custom")),
-        (
-            "/choices/0/message/tool_calls/0/function/arguments",
-            json!("{"),
-        ),
-        (
-            "/choices/0/message/tool_calls/0/function/arguments",
-            json!("{\"command\":\"id\",\"command\":\"pwd\"}"),
-        ),
         (
             "/choices/0/message/tool_calls/0/function/arguments",
             json!({"command":"id"}),
@@ -186,13 +179,6 @@ fn rejects_malformed_envelopes_and_truncated_or_ambiguous_completions() -> TestR
         *field = replacement;
         fixtures.push(fixture);
     }
-    let first = good
-        .pointer("/choices/0/message/tool_calls/0")
-        .ok_or("fixture call missing")?;
-    fixtures.push(response(
-        json!({"role":"assistant","tool_calls":[first,first]}),
-        "tool_calls",
-    ));
     for fixture in fixtures {
         assert!(
             wire::decode_response(&serde_json::to_vec(&fixture)?).is_err(),
@@ -755,15 +741,10 @@ async fn async_loop_preserves_history_and_classifies_inference_failures_without_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn async_loop_stops_for_command_failure_protocol_error_and_turn_limit() -> TestResult {
+async fn async_loop_stops_for_command_failure_or_exhausted_turn_budget() -> TestResult {
     for (mixed, failure, expected_calls, outcome) in [
         (false, None, 2, RunOutcome::ModelTurnLimit),
-        (
-            true,
-            None,
-            0,
-            RunOutcome::ProtocolError(ProtocolError::MixedSubmissionAndCommands),
-        ),
+        (true, None, 0, RunOutcome::ModelTurnLimit),
         (
             false,
             Some(lost_reply()),
@@ -804,6 +785,108 @@ async fn async_loop_stops_for_command_failure_protocol_error_and_turn_limit() ->
                 })
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_batches_can_be_corrected_without_executing_any_rejected_commands() -> TestResult
+{
+    for bad in [
+        call("bad", "execute_target_command", "{".into()),
+        call(
+            "bad",
+            "execute_target_command",
+            r#"{"command":"id","command":"pwd"}"#.into(),
+        ),
+        call("bad", "submit", r#"{"answer":42}"#.into()),
+        call("bad", "unknown", "{}".into()),
+        call("", "execute_target_command", r#"{"command":"pwd"}"#.into()),
+        call(
+            "call-1",
+            "execute_target_command",
+            r#"{"command":"pwd"}"#.into(),
+        ),
+        call("bad", "submit", r#"{"answer":"too early"}"#.into()),
+    ] {
+        let rejected = response(
+            json!({"role":"assistant","tool_calls":[
+                call("call-1", "execute_target_command", r#"{"command":"must not run"}"#.into()), bad
+            ]}),
+            "tool_calls",
+        );
+        let submit = response(
+            json!({"role":"assistant","tool_calls":[
+                call("final", "submit", r#"{"answer":"done"}"#.into())
+            ]}),
+            "tool_calls",
+        );
+        let (endpoint, server) = fake_sequence(vec![
+            Reply::Http {
+                status: 200,
+                body: serde_json::to_vec(&rejected)?,
+            },
+            Reply::Http {
+                status: 200,
+                body: command_response()?,
+            },
+            Reply::Http {
+                status: 200,
+                body: serde_json::to_vec(&submit)?,
+            },
+        ])
+        .await?;
+        let mut client = InferenceClient::new(config(endpoint))?;
+        let mut executor = MemoryExecutor::default();
+        let report = crate::harness::async_driver::run(
+            "system".into(),
+            "task".into(),
+            3,
+            &mut client,
+            &mut executor,
+        )
+        .await;
+        assert_eq!(
+            report.outcome,
+            RunOutcome::Submitted {
+                answer: "done".into()
+            }
+        );
+        assert_eq!(
+            executor.calls,
+            vec![CommandCall {
+                id: id("call-1")?,
+                command: "id".into()
+            }]
+        );
+        let captured = server.await??;
+        let correction_request: Value =
+            serde_json::from_slice(&captured.get(1).ok_or("missing correction request")?.body)?;
+        assert_eq!(
+            correction_request.pointer("/messages/2/role"),
+            Some(&json!("user"))
+        );
+        let feedback = correction_request
+            .pointer("/messages/2/content")
+            .and_then(Value::as_str)
+            .ok_or("missing feedback")?;
+        assert!(feedback.contains("No tools in this response were executed"));
+        assert!(feedback.contains("must not run"));
+        assert!(
+            correction_request
+                .pointer("/messages/2/tool_calls")
+                .is_none()
+        );
+        let projected = crate::harness::report::view("correction-test", &report);
+        assert_eq!(
+            projected.pointer("/history/2/role"),
+            Some(&json!("tool_call_correction"))
+        );
+        assert!(
+            projected
+                .pointer("/history/2/rejected_response/tool_calls")
+                .is_some()
+        );
     }
     Ok(())
 }

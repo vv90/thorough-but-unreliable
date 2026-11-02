@@ -19,6 +19,13 @@ fn message(message: &Message) -> Value {
     match message {
         Message::System(text) => json!({"role":"system","content":text}),
         Message::User(text) => json!({"role":"user","content":text}),
+        Message::ToolCallCorrection {
+            response,
+            diagnostic,
+        } => json!({
+            "role":"tool_call_correction", "diagnostic":diagnostic,
+            "rejected_response":self::message(&Message::Assistant(response.clone()))
+        }),
         Message::Assistant(response) => {
             let calls: Vec<_> = response
                 .tool_calls
@@ -28,6 +35,7 @@ fn message(message: &Message) -> Value {
                         Tool::ExecuteTargetCommand { command } => {
                             json!({"kind":"execute_target_command","command":command})
                         }
+                        Tool::Invalid { name, arguments, diagnostic } => json!({"kind":"invalid","name":name,"arguments":arguments,"diagnostic":diagnostic}),
                         Tool::Submit { answer } => json!({"kind":"submit","answer":answer}),
                     };
                     json!({"id":call.id,"tool":tool})
@@ -54,6 +62,9 @@ fn outcome(outcome: &RunOutcome) -> Value {
         RunOutcome::ModelTurnLimit => json!({"kind":"model_turn_limit"}),
         RunOutcome::ProtocolError(error) => {
             let error = match error {
+                ProtocolError::InvalidTool(diagnostic) => {
+                    json!({"kind":"invalid_tool","diagnostic":diagnostic})
+                }
                 ProtocolError::EmptyCallId => json!({"kind":"empty_call_id"}),
                 ProtocolError::DuplicateCallId(id) => {
                     json!({"kind":"duplicate_call_id","call_id":id})

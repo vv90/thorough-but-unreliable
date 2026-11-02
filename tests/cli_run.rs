@@ -229,12 +229,12 @@ async fn non_submission_outcomes_export_reports_and_exit_nonzero() -> TestResult
             assistant(vec![submission, command_call()]),
         )],
         "run",
-        |_| Ok(()),
+        |m| set(m, "/max_model_turns", json!(1)),
     )
     .await?;
     assert_eq!(
         report(&invalid, false)?.pointer("/outcome/kind"),
-        Some(&json!("protocol_error"))
+        Some(&json!("model_turn_limit"))
     );
     Ok(())
 }

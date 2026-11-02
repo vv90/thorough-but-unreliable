@@ -81,14 +81,32 @@ impl ModelTurn {
             }
         };
 
-        let decision = classify(&response);
-        // Preserve even a rejected response for diagnosis.
+        let decision = match classify(&response) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let reason = match error {
+                    ProtocolError::InvalidTool(diagnostic) => diagnostic,
+                    ProtocolError::EmptyCallId => "Tool call IDs must not be empty.".into(),
+                    ProtocolError::DuplicateCallId(_) => {
+                        "Tool call IDs must be unique within a response.".into()
+                    }
+                    ProtocolError::MultipleSubmissions => "Call submit only once.".into(),
+                    ProtocolError::MixedSubmissionAndCommands => {
+                        "Call submit separately from execute_target_command.".into()
+                    }
+                };
+                context.history.push(Message::ToolCallCorrection {
+                    response,
+                    diagnostic: format!("No tools in this response were executed. {reason} Correct the tool calls and try again. execute_target_command requires exactly {{\"command\": string}}; submit requires exactly {{\"answer\": string}}."),
+                });
+                return context.next_model();
+            }
+        };
         context.history.push(Message::Assistant(response));
         match decision {
-            Err(error) => context.finish(RunOutcome::ProtocolError(error)),
-            Ok(Decision::EarlyTermination) => context.finish(RunOutcome::EarlyTermination),
-            Ok(Decision::Submit(answer)) => context.finish(RunOutcome::Submitted { answer }),
-            Ok(Decision::Commands(commands)) => context.next_command(commands),
+            Decision::EarlyTermination => context.finish(RunOutcome::EarlyTermination),
+            Decision::Submit(answer) => context.finish(RunOutcome::Submitted { answer }),
+            Decision::Commands(commands) => context.next_command(commands),
         }
     }
 }
@@ -148,6 +166,9 @@ fn classify(response: &AssistantResponse) -> Result<Decision, ProtocolError> {
             return Err(ProtocolError::DuplicateCallId(call.id.clone()));
         }
         match &call.tool {
+            Tool::Invalid { diagnostic, .. } => {
+                return Err(ProtocolError::InvalidTool(diagnostic.clone()));
+            }
             Tool::ExecuteTargetCommand { command } => commands.push_back(CommandCall {
                 id,
                 command: command.clone(),

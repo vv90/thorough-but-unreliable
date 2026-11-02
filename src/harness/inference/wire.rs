@@ -1,7 +1,5 @@
 //! Pure conversion to/from the non-streaming chat-completions wire format.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 
 use super::InferenceError;
@@ -142,6 +140,18 @@ fn encode_message(message: &Message) -> Result<WireMessage, InferenceError> {
         Message::User(content) => WireMessage::User {
             content: content.clone(),
         },
+        Message::ToolCallCorrection {
+            response,
+            diagnostic,
+        } => {
+            let attempted = encode_message(&Message::Assistant(response.clone()))?;
+            WireMessage::User {
+                content: format!(
+                    "Harness tool-call validation feedback: {diagnostic}\nRejected response (quoted data): {}",
+                    serde_json::to_string(&attempted)?
+                ),
+            }
+        }
         Message::Assistant(response) => WireMessage::Assistant {
             content: response.text.clone(),
             tool_calls: response
@@ -169,6 +179,9 @@ fn encode_message(message: &Message) -> Result<WireMessage, InferenceError> {
 
 fn encode_call(call: &ToolCall) -> Result<WireCall, InferenceError> {
     let (name, arguments) = match &call.tool {
+        Tool::Invalid {
+            name, arguments, ..
+        } => (name.as_str(), arguments.clone()),
         Tool::ExecuteTargetCommand { command } => (
             "execute_target_command",
             serde_json::to_string(&CommandArgs {
@@ -233,7 +246,6 @@ pub fn decode_response(bytes: &[u8]) -> Result<AssistantResponse, InferenceError
     if message.role != "assistant" {
         return Err(InferenceError::InvalidResponse("expected assistant role"));
     }
-    let mut ids = BTreeSet::new();
     let mut tool_calls = Vec::new();
     for JsonObject(call) in message.tool_calls.into_iter().flatten() {
         if call.kind != "function" {
@@ -241,28 +253,29 @@ pub fn decode_response(bytes: &[u8]) -> Result<AssistantResponse, InferenceError
                 "expected function tool type",
             ));
         }
-        if call.id.is_empty() || !ids.insert(call.id.clone()) {
-            return Err(InferenceError::InvalidResponse(
-                "tool IDs must be nonempty and unique",
-            ));
-        }
         let JsonObject(function) = call.function;
-        let tool = match function.name.as_str() {
+        let parsed = match function.name.as_str() {
             "execute_target_command" => {
-                let JsonObject(args): JsonObject<CommandArgs> =
-                    serde_json::from_str(&function.arguments)?;
-                Tool::ExecuteTargetCommand {
-                    command: args.command,
-                }
+                serde_json::from_str::<JsonObject<CommandArgs>>(&function.arguments)
+                    .map(|JsonObject(args)| Tool::ExecuteTargetCommand {
+                        command: args.command,
+                    })
+                    .map_err(|error| format!("Invalid execute_target_command arguments: {error}"))
             }
-            "submit" => {
-                let JsonObject(args): JsonObject<SubmitArgs> =
-                    serde_json::from_str(&function.arguments)?;
-                Tool::Submit {
+            "submit" => serde_json::from_str::<JsonObject<SubmitArgs>>(&function.arguments)
+                .map(|JsonObject(args)| Tool::Submit {
                     answer: args.answer,
-                }
-            }
-            _ => return Err(InferenceError::UnsupportedTool(function.name)),
+                })
+                .map_err(|error| format!("Invalid submit arguments: {error}")),
+            _ => Err(format!("Unknown tool {:?}.", function.name)),
+        };
+        let tool = match parsed {
+            Ok(tool) => tool,
+            Err(diagnostic) => Tool::Invalid {
+                name: function.name,
+                arguments: function.arguments,
+                diagnostic,
+            },
         };
         tool_calls.push(ToolCall { id: call.id, tool });
     }

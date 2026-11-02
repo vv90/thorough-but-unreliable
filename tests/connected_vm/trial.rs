@@ -76,7 +76,12 @@ fn verify_recorded(manifest: &Manifest, report: &Value) -> TestResult {
         || messages.next() != Some(&json!({"role":"user","content":manifest.task()}))
         || history
             .iter()
-            .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+            .filter(|m| {
+                matches!(
+                    m.get("role").and_then(Value::as_str),
+                    Some("assistant" | "tool_call_correction")
+                )
+            })
             .count()
             > usize::try_from(manifest.max_model_turns().get())?
     {

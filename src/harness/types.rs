@@ -8,6 +8,11 @@ pub enum Message {
     System(String),
     User(String),
     Assistant(AssistantResponse),
+    /// Rejected batch, quoted as feedback rather than replayed as tool calls.
+    ToolCallCorrection {
+        response: AssistantResponse,
+        diagnostic: String,
+    },
     Tool {
         call_id: ToolCallId,
         result: Result<ExecutionReport, CommandClientError>,
@@ -29,8 +34,18 @@ pub struct ToolCall {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tool {
-    ExecuteTargetCommand { command: String },
-    Submit { answer: String },
+    /// A well-framed call with an unknown name or invalid arguments; never executable.
+    Invalid {
+        name: String,
+        arguments: String,
+        diagnostic: String,
+    },
+    ExecuteTargetCommand {
+        command: String,
+    },
+    Submit {
+        answer: String,
+    },
 }
 
 /// Validated model identifier. It is not a broker command sequence number.
@@ -184,6 +199,7 @@ impl std::error::Error for CommandClientError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolError {
+    InvalidTool(String),
     EmptyCallId,
     DuplicateCallId(String),
     MultipleSubmissions,
